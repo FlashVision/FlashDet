@@ -27,6 +27,7 @@ from flashdet.utils.torchtune_optim import (
     create_optimizer,
     compile_model as torchtune_compile,
 )
+from flashdet.engine.callbacks import CallbackList, Callback
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,15 @@ class Trainer:
 
         os.makedirs(self.save_dir, exist_ok=True)
         self._logger = setup_logger("FlashDet", self.save_dir)
+        self.callbacks = CallbackList()
+
+    # ------------------------------------------------------------------
+    # Callback API
+    # ------------------------------------------------------------------
+
+    def add_callback(self, callback: Callback) -> None:
+        """Register a training callback."""
+        self.callbacks.add(callback)
 
     # ------------------------------------------------------------------
     # Public API
@@ -343,6 +353,7 @@ class Trainer:
         # Training loop
         self._logger.info("\nStarting training...")
         epochs_without_improvement = 0
+        self.callbacks.fire("on_train_start", self)
 
         for epoch in range(start_epoch, self.epochs):
             if self.optimizer_in_bwd:
@@ -353,16 +364,23 @@ class Trainer:
                 current_lr = optimizer.param_groups[0]["lr"]
 
             self._logger.info(f"\nEpoch {epoch + 1}/{self.epochs} (lr={current_lr:.6f})")
+            self.callbacks.fire("on_epoch_start", self, epoch + 1)
 
             train_losses = self._train_one_epoch(
                 model, train_loader, optimizer, epoch + 1, ema, scaler,
             )
 
+            epoch_metrics = {"train_loss": train_losses["loss"], "lr": current_lr}
+
             # Validate
             if (epoch + 1) % cfg.train.val_interval == 0:
+                self.callbacks.fire("on_val_start", self)
                 val_loss, map50 = self._validate(
                     raw_model, val_loader, ema, class_names,
                 )
+                epoch_metrics["val_loss"] = val_loss
+                epoch_metrics["val_mAP"] = map50
+                self.callbacks.fire("on_val_end", self, {"val_loss": val_loss, "val_mAP": map50})
 
                 if val_loss < best_loss:
                     best_loss = val_loss
@@ -370,9 +388,10 @@ class Trainer:
                 if map50 > best_map50:
                     best_map50 = map50
                     epochs_without_improvement = 0
+                    best_path = os.path.join(self.save_dir, "checkpoint_best.pth")
                     save_checkpoint(
                         raw_model, optimizer, epoch, val_loss,
-                        os.path.join(self.save_dir, "checkpoint_best.pth"),
+                        best_path,
                         scheduler=scheduler, config=model_config,
                     )
                     save_inference_weights(
@@ -381,6 +400,7 @@ class Trainer:
                         config=model_config, half=False,
                     )
                     self._logger.info(f"  Best model saved (mAP@0.5: {best_map50:.4f})")
+                    self.callbacks.fire("on_checkpoint", self, best_path, True)
                 else:
                     epochs_without_improvement += cfg.train.val_interval
 
@@ -388,20 +408,32 @@ class Trainer:
                     self._logger.info(f"Early stopping at epoch {epoch + 1}")
                     break
 
-            # Save latest
-            save_checkpoint(
-                raw_model, optimizer, epoch, train_losses["loss"],
-                os.path.join(self.save_dir, "checkpoint_last.pth"),
-                scheduler=scheduler, config=model_config, ema=ema,
-            )
-            save_inference_weights(
-                ema.ema,
-                os.path.join(self.save_dir, "model_last_inference.pth"),
-                config=model_config, half=False,
-            )
+            self.callbacks.fire("on_epoch_end", self, epoch + 1, epoch_metrics)
 
-            if scheduler is not None:
-                scheduler.step()
+            # Check callback-driven early stopping
+            for cb in self.callbacks.callbacks:
+                if getattr(cb, "should_stop", False):
+                    self._logger.info("Stopping training (callback request).")
+                    break
+            else:
+                # Save latest
+                last_path = os.path.join(self.save_dir, "checkpoint_last.pth")
+                save_checkpoint(
+                    raw_model, optimizer, epoch, train_losses["loss"],
+                    last_path,
+                    scheduler=scheduler, config=model_config, ema=ema,
+                )
+                save_inference_weights(
+                    ema.ema,
+                    os.path.join(self.save_dir, "model_last_inference.pth"),
+                    config=model_config, half=False,
+                )
+                self.callbacks.fire("on_checkpoint", self, last_path, False)
+
+                if scheduler is not None:
+                    scheduler.step()
+                continue
+            break
 
         # Final save
         if self.lora or self.qlora:
@@ -423,12 +455,15 @@ class Trainer:
         if offload_hook is not None:
             offload_hook.remove()
 
+        final_metrics = {"best_map50": best_map50, "best_loss": best_loss}
+        self.callbacks.fire("on_train_end", self, final_metrics)
+
         self._logger.info("=" * 60)
         self._logger.info("Training Complete!")
         self._logger.info(f"Best mAP@0.5: {best_map50:.4f}  |  Best Loss: {best_loss:.4f}")
         self._logger.info("=" * 60)
 
-        return {"best_map50": best_map50, "best_loss": best_loss}
+        return final_metrics
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -506,6 +541,7 @@ class Trainer:
         raw_model = model.module if hasattr(model, "module") else model
 
         for batch_idx, (images, gt_meta) in enumerate(dataloader):
+            self.callbacks.fire("on_batch_start", self, batch_idx, (images, gt_meta))
             images = images.to(self.device)
 
             with torch.amp.autocast(self.device.type, enabled=use_amp):
@@ -535,6 +571,7 @@ class Trainer:
                     ema.update(raw_model)
 
             loss_meter.update(output["loss"].item())
+            self.callbacks.fire("on_batch_end", self, batch_idx, output["loss"].item())
 
             if (batch_idx + 1) % 10 == 0:
                 self._logger.info(

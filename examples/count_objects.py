@@ -33,8 +33,8 @@ while cap.isOpened():
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
-counts = counter.get_results()
-print(f"Total counted: UP={counts['up']}, DOWN={counts['down']}")
+counts = counter.get_counts()
+print(f"Total counted: IN={counts['in']}, OUT={counts['out']}, TOTAL={counts['total']}")
 
 cap.release()
 cv2.destroyAllWindows()

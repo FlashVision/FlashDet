@@ -133,6 +133,22 @@ class Predictor:
         self.model = self.model.to(self.device).eval()
         self.transform = InferenceTransform(input_size=self.input_size)
 
+    def __call__(self, image: np.ndarray) -> np.ndarray:
+        """Make Predictor callable for use with Solutions (ObjectCounter, etc.).
+
+        Returns:
+            Nx6 numpy array of [x1, y1, x2, y2, score, class_id].
+        """
+        detections = self.detect(image)
+        if not detections:
+            return np.empty((0, 6), dtype=np.float64)
+
+        rows = []
+        for cls_name, score, x1, y1, x2, y2 in detections:
+            cls_id = self.class_names.index(cls_name) if cls_name in self.class_names else 0
+            rows.append([x1, y1, x2, y2, score, cls_id])
+        return np.array(rows, dtype=np.float64)
+
     @torch.no_grad()
     def detect(self, image: np.ndarray) -> List[Tuple[str, float, int, int, int, int]]:
         """Run detection on a BGR image.
