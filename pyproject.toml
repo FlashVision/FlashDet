@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=70.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flashdet"
+version = "1.0.0"
+description = "FlashDet: Ultra-lightweight real-time object detection with LoRA fine-tuning and Knowledge Distillation"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "FlashVision"},
+]
+keywords = ["object-detection", "computer-vision", "deep-learning", "pytorch", "lora", "knowledge-distillation", "nanodet", "edge-ai", "onnx", "quantization"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "numpy>=1.24.0",
+    "opencv-python>=4.8.0",
+    "Pillow>=9.0.0",
+    "pycocotools>=2.0.6",
+    "PyYAML>=6.0",
+    "tqdm>=4.65.0",
+]
+
+[project.optional-dependencies]
+export = ["onnx>=1.14.0", "onnxruntime>=1.15.0", "onnxsim>=0.4.0"]
+tracker = ["scipy>=1.10.0", "lap>=0.4.0"]
+solutions = ["scipy>=1.10.0"]
+analytics = ["matplotlib>=3.7.0", "pandas>=2.0.0"]
+all = ["onnx>=1.14.0", "onnxruntime>=1.15.0", "onnxsim>=0.4.0", "scipy>=1.10.0", "lap>=0.4.0", "matplotlib>=3.7.0", "pandas>=2.0.0"]
+dev = ["pytest", "ruff", "pre-commit"]
+
+[project.urls]
+Homepage = "https://github.com/FlashVision/FlashDet"
+Repository = "https://github.com/FlashVision/FlashDet"
+Issues = "https://github.com/FlashVision/FlashDet/issues"
+
+[project.scripts]
+flashdet = "flashdet.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["flashdet*"]
+
+[tool.ruff]
+line-length = 120
