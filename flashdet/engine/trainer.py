@@ -1,0 +1,585 @@
+"""FlashDet Trainer — wraps the full training loop into a reusable class."""
+
+import os
+import copy
+import math
+import json
+import logging
+from typing import Dict, List, Optional, Any
+
+import numpy as np
+import torch
+import torch.nn as nn
+
+from flashdet.cfg import get_config
+from flashdet.models import FlashDet, load_coco_pretrained
+from flashdet.models.lora import (
+    apply_lora, apply_qlora, merge_lora_weights, get_lora_state_dict,
+)
+from flashdet.data import create_dataloader, verify_dataset
+from flashdet.utils import (
+    save_checkpoint, load_checkpoint, save_inference_weights, setup_logger, AverageMeter,
+)
+from flashdet.utils.metrics import compute_map
+from flashdet.utils.torchtune_optim import (
+    apply_activation_checkpointing,
+    ActivationOffloadHook,
+    create_optimizer,
+    compile_model as torchtune_compile,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class ModelEMA:
+    """Exponential Moving Average of model weights with adaptive decay warmup."""
+
+    def __init__(self, model: nn.Module, decay: float = 0.9998, warmup: int = 2000):
+        self.ema = copy.deepcopy(model)
+        self.ema.eval()
+        self.target_decay = decay
+        self.warmup = warmup
+        self.num_updates = 0
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+
+    @property
+    def decay(self):
+        return min(self.target_decay,
+                   (1 + self.num_updates) / (self.warmup + self.num_updates))
+
+    @torch.no_grad()
+    def update(self, model: nn.Module):
+        self.num_updates += 1
+        d = self.decay
+        for ema_p, model_p in zip(self.ema.parameters(), model.parameters()):
+            ema_p.data.mul_(d).add_(model_p.data, alpha=1.0 - d)
+        for ema_b, model_b in zip(self.ema.buffers(), model.buffers()):
+            ema_b.copy_(model_b)
+
+    def state_dict(self):
+        return {
+            "ema_state": self.ema.state_dict(),
+            "target_decay": self.target_decay,
+            "warmup": self.warmup,
+            "num_updates": self.num_updates,
+        }
+
+    def load_state_dict(self, state: dict):
+        self.ema.load_state_dict(state["ema_state"], strict=False)
+        self.target_decay = state.get("target_decay",
+                                      state.get("decay", self.target_decay))
+        self.warmup = state.get("warmup", self.warmup)
+        self.num_updates = state.get("num_updates", 0)
+
+
+MODEL_SIZE_MAP = {
+    "m": {"backbone": "1.0x", "fpn_channels": 96},
+    "m-1.5x": {"backbone": "1.5x", "fpn_channels": 128},
+    "m-0.5x": {"backbone": "0.5x", "fpn_channels": 96},
+}
+
+
+class Trainer:
+    """High-level trainer for FlashDet.
+
+    Example::
+
+        from flashdet import Trainer
+
+        trainer = Trainer(
+            epochs=100,
+            batch_size=32,
+            model_size="m",
+            pretrained_coco=True,
+            lora=True,
+            amp=True,
+        )
+        trainer.train()
+    """
+
+    def __init__(
+        self,
+        # Basic training
+        epochs: int = 100,
+        batch_size: int = 32,
+        lr: float = 0.001,
+        workers: int = 4,
+        save_dir: str = "workspace/ppe_detector",
+        resume: Optional[str] = None,
+        device: str = "cuda",
+        warmup_epochs: int = 5,
+        patience: int = 50,
+        # Model
+        model_size: str = "m",
+        input_size: int = 320,
+        finetune: Optional[str] = None,
+        pretrained_coco: bool = False,
+        pretrained_ckpt: Optional[str] = None,
+        # Data
+        class_file: Optional[str] = None,
+        train_images: Optional[str] = None,
+        val_images: Optional[str] = None,
+        # Performance
+        amp: bool = False,
+        multi_gpu: bool = False,
+        grad_accum: int = 1,
+        # torchtune optimizations
+        activation_checkpointing: bool = False,
+        activation_offloading: bool = False,
+        optimizer_in_bwd: bool = False,
+        use_8bit_optimizer: bool = False,
+        compile: bool = False,
+        chunked_loss: bool = False,
+        chunk_size: int = 1024,
+        # LoRA
+        lora: bool = False,
+        lora_variant: str = "standard",
+        lora_rank: int = 8,
+        lora_alpha: float = 16.0,
+        lora_dropout: float = 0.05,
+        lora_targets: Optional[List[str]] = None,
+        qlora: bool = False,
+        qlora_dtype: str = "int8",
+        # Config override
+        config: Any = None,
+    ):
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.lr = lr
+        self.workers = workers
+        self.save_dir = save_dir
+        self.resume = resume
+        self.warmup_epochs = warmup_epochs
+        self.patience = patience
+        self.model_size = model_size
+        self.input_size = (input_size, input_size)
+        self.finetune = finetune
+        self.pretrained_coco = pretrained_coco
+        self.pretrained_ckpt = pretrained_ckpt
+        self.class_file = class_file
+        self.train_images = train_images
+        self.val_images = val_images
+        self.amp = amp
+        self.multi_gpu = multi_gpu
+        self.grad_accum = max(1, grad_accum)
+        self.activation_checkpointing = activation_checkpointing
+        self.activation_offloading = activation_offloading
+        self.optimizer_in_bwd = optimizer_in_bwd
+        self.use_8bit_optimizer = use_8bit_optimizer
+        self.compile = compile
+        self.chunked_loss = chunked_loss
+        self.chunk_size = chunk_size
+        self.lora = lora
+        self.lora_variant = lora_variant
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        self.lora_dropout = lora_dropout
+        self.lora_targets = lora_targets or ["backbone", "fpn"]
+        self.qlora = qlora
+        self.qlora_dtype = qlora_dtype
+
+        self._config = config or get_config()
+        self._model_cfg = MODEL_SIZE_MAP[self.model_size]
+
+        # Resolve device
+        if torch.cuda.is_available():
+            self.device = torch.device(device)
+        else:
+            self.device = torch.device("cpu")
+            if device not in ("cpu", ""):
+                logger.warning("CUDA unavailable; falling back to CPU.")
+
+        os.makedirs(self.save_dir, exist_ok=True)
+        self._logger = setup_logger("FlashDet", self.save_dir)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def train(self) -> Dict[str, float]:
+        """Run the full training loop. Returns dict with best_map50 and best_loss."""
+        cfg = self._config
+
+        if self.train_images:
+            cfg.data.train_images = self.train_images
+            cfg.data.train_annotations = os.path.join(self.train_images, "_annotations.coco.json")
+        if self.val_images:
+            cfg.data.val_images = self.val_images
+            cfg.data.val_annotations = os.path.join(self.val_images, "_annotations.coco.json")
+
+        class_names = self._resolve_class_names(cfg)
+        num_classes = len(class_names)
+
+        self._logger.info("=" * 60)
+        self._logger.info("FlashDet Training")
+        self._logger.info("=" * 60)
+        self._logger.info(f"Device: {self.device}")
+        self._logger.info(f"Model: {self.model_size}, Input: {self.input_size}")
+        self._logger.info(f"Epochs: {self.epochs}, Batch: {self.batch_size}, LR: {self.lr}")
+        self._logger.info(f"Classes ({num_classes}): {class_names}")
+
+        # Dataset verification
+        data_root = os.path.dirname(os.path.normpath(cfg.data.train_images))
+        if not verify_dataset(data_root):
+            self._logger.error("Dataset not found! Please download it first.")
+            raise FileNotFoundError(f"Dataset not found at {data_root}")
+
+        # Data loaders
+        train_loader = create_dataloader(
+            img_dir=cfg.data.train_images,
+            ann_file=cfg.data.train_annotations,
+            batch_size=self.batch_size,
+            input_size=self.input_size,
+            num_workers=self.workers,
+            is_train=True,
+        )
+        val_loader = create_dataloader(
+            img_dir=cfg.data.val_images,
+            ann_file=cfg.data.val_annotations,
+            batch_size=self.batch_size,
+            input_size=self.input_size,
+            num_workers=self.workers,
+            is_train=False,
+        )
+
+        # Build model
+        model = FlashDet(
+            num_classes=num_classes,
+            input_size=self.input_size,
+            backbone_size=self._model_cfg["backbone"],
+            fpn_channels=self._model_cfg["fpn_channels"],
+            pretrained=cfg.model.backbone_pretrained,
+            use_aux_head=True,
+        ).to(self.device)
+
+        # Apply LoRA / QLoRA
+        model = self._apply_lora(model)
+
+        # Fine-tune / pretrained COCO
+        self._load_pretrained(model, cfg)
+
+        # Chunked loss
+        if self.chunked_loss:
+            head = getattr(model, "head", None)
+            if head is not None:
+                head.use_chunked_loss = True
+                head.chunk_size = self.chunk_size
+
+        # AMP
+        scaler = None
+        if self.amp and self.device.type == "cuda":
+            scaler = torch.amp.GradScaler("cuda", enabled=True)
+            self._logger.info("AMP enabled")
+
+        # Multi-GPU
+        use_multi_gpu = self.multi_gpu and torch.cuda.device_count() > 1
+        if use_multi_gpu:
+            model = nn.DataParallel(model)
+
+        raw_model = model.module if use_multi_gpu else model
+
+        # torchtune optimizations
+        if self.activation_checkpointing:
+            apply_activation_checkpointing(raw_model)
+        offload_hook = None
+        if self.activation_offloading:
+            offload_hook = ActivationOffloadHook()
+            offload_hook.register(raw_model)
+        if self.compile:
+            raw_model = torchtune_compile(raw_model)
+            if not use_multi_gpu:
+                model = raw_model
+
+        # Optimizer
+        optimizer = create_optimizer(
+            model, lr=self.lr, weight_decay=cfg.train.weight_decay,
+            use_8bit=self.use_8bit_optimizer, optimizer_in_bwd=self.optimizer_in_bwd,
+            betas=(0.9, 0.999),
+        )
+
+        # LR schedule
+        eta_min = 0.00005
+        eta_min_factor = eta_min / self.lr
+
+        def lr_lambda(epoch):
+            if epoch < self.warmup_epochs:
+                return (epoch + 1) / self.warmup_epochs
+            progress = (epoch - self.warmup_epochs) / max(self.epochs - self.warmup_epochs, 1)
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return eta_min_factor + (1.0 - eta_min_factor) * cosine
+
+        scheduler = None
+        if not self.optimizer_in_bwd:
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+        # EMA
+        ema = ModelEMA(raw_model, decay=0.9998, warmup=2000)
+
+        # Resume
+        start_epoch = 0
+        best_loss = float("inf")
+        best_map50 = 0.0
+
+        if self.resume:
+            ckpt = load_checkpoint(raw_model, self.resume, optimizer, scheduler, self.device)
+            start_epoch = ckpt["epoch"] + 1
+            best_loss = ckpt.get("loss", float("inf"))
+            raw_ckpt = torch.load(self.resume, map_location=self.device, weights_only=False)
+            if raw_ckpt and "ema_state_dict" in raw_ckpt:
+                ema.load_state_dict(raw_ckpt["ema_state_dict"])
+            else:
+                ema = ModelEMA(raw_model, decay=0.9998, warmup=2000)
+            self._logger.info(f"Resumed from epoch {start_epoch}")
+
+        model_config = {
+            "num_classes": num_classes,
+            "input_size": self.input_size,
+            "backbone_size": self._model_cfg["backbone"],
+            "fpn_channels": self._model_cfg["fpn_channels"],
+            "class_names": class_names,
+        }
+
+        # Training loop
+        self._logger.info("\nStarting training...")
+        epochs_without_improvement = 0
+
+        for epoch in range(start_epoch, self.epochs):
+            if self.optimizer_in_bwd:
+                lr_factor = lr_lambda(epoch)
+                current_lr = self.lr * lr_factor
+                optimizer.set_lr(current_lr)
+            else:
+                current_lr = optimizer.param_groups[0]["lr"]
+
+            self._logger.info(f"\nEpoch {epoch + 1}/{self.epochs} (lr={current_lr:.6f})")
+
+            train_losses = self._train_one_epoch(
+                model, train_loader, optimizer, epoch + 1, ema, scaler,
+            )
+
+            # Validate
+            if (epoch + 1) % cfg.train.val_interval == 0:
+                val_loss, map50 = self._validate(
+                    raw_model, val_loader, ema, class_names,
+                )
+
+                if val_loss < best_loss:
+                    best_loss = val_loss
+
+                if map50 > best_map50:
+                    best_map50 = map50
+                    epochs_without_improvement = 0
+                    save_checkpoint(
+                        raw_model, optimizer, epoch, val_loss,
+                        os.path.join(self.save_dir, "checkpoint_best.pth"),
+                        scheduler=scheduler, config=model_config,
+                    )
+                    save_inference_weights(
+                        ema.ema,
+                        os.path.join(self.save_dir, "model_best_inference.pth"),
+                        config=model_config, half=False,
+                    )
+                    self._logger.info(f"  Best model saved (mAP@0.5: {best_map50:.4f})")
+                else:
+                    epochs_without_improvement += cfg.train.val_interval
+
+                if self.patience > 0 and epochs_without_improvement >= self.patience:
+                    self._logger.info(f"Early stopping at epoch {epoch + 1}")
+                    break
+
+            # Save latest
+            save_checkpoint(
+                raw_model, optimizer, epoch, train_losses["loss"],
+                os.path.join(self.save_dir, "checkpoint_last.pth"),
+                scheduler=scheduler, config=model_config, ema=ema,
+            )
+            save_inference_weights(
+                ema.ema,
+                os.path.join(self.save_dir, "model_last_inference.pth"),
+                config=model_config, half=False,
+            )
+
+            if scheduler is not None:
+                scheduler.step()
+
+        # Final save
+        if self.lora or self.qlora:
+            lora_path = os.path.join(self.save_dir, "lora_adapters.pth")
+            torch.save(get_lora_state_dict(ema.ema), lora_path)
+            merge_lora_weights(ema.ema)
+
+        save_inference_weights(
+            ema.ema,
+            os.path.join(self.save_dir, "model_final_inference.pth"),
+            config=model_config, half=False,
+        )
+        save_inference_weights(
+            ema.ema,
+            os.path.join(self.save_dir, "model_final_fp16.pth"),
+            config=model_config, half=True,
+        )
+
+        if offload_hook is not None:
+            offload_hook.remove()
+
+        self._logger.info("=" * 60)
+        self._logger.info("Training Complete!")
+        self._logger.info(f"Best mAP@0.5: {best_map50:.4f}  |  Best Loss: {best_loss:.4f}")
+        self._logger.info("=" * 60)
+
+        return {"best_map50": best_map50, "best_loss": best_loss}
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_class_names(self, cfg) -> List[str]:
+        class_names = None
+        if self.class_file:
+            with open(self.class_file, encoding="utf-8") as f:
+                class_names = [line.strip() for line in f if line.strip()]
+        if not class_names:
+            class_names = self._load_class_names_from_ann(cfg.data.train_annotations)
+        if not class_names:
+            class_names = cfg.class_names
+        return class_names
+
+    @staticmethod
+    def _load_class_names_from_ann(ann_file: str) -> List[str]:
+        try:
+            with open(ann_file) as f:
+                ann = json.load(f)
+            cats = ann.get("categories", [])
+            if not cats:
+                return []
+            cat_ids = sorted(c["id"] for c in cats)
+            id_to_name = {c["id"]: c["name"] for c in cats}
+            return [id_to_name[cid] for cid in cat_ids]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return []
+
+    def _apply_lora(self, model: nn.Module) -> nn.Module:
+        if self.qlora:
+            model = apply_qlora(
+                model, rank=self.lora_rank, alpha=self.lora_alpha,
+                dropout=self.lora_dropout, target_modules=self.lora_targets,
+                quant_dtype=self.qlora_dtype, variant=self.lora_variant,
+            )
+            self._logger.info(f"QLoRA applied (rank={self.lora_rank})")
+        elif self.lora:
+            model = apply_lora(
+                model, rank=self.lora_rank, alpha=self.lora_alpha,
+                dropout=self.lora_dropout, target_modules=self.lora_targets,
+                variant=self.lora_variant,
+            )
+            self._logger.info(f"LoRA applied (rank={self.lora_rank})")
+        return model
+
+    def _load_pretrained(self, model: nn.Module, cfg):
+        if self.finetune and not self.resume:
+            ckpt = torch.load(self.finetune, map_location=self.device, weights_only=False)
+            src_sd = ckpt.get("model_state_dict", ckpt)
+            src_sd = {k: v.float() if v.is_floating_point() else v for k, v in src_sd.items()}
+            model.load_state_dict(src_sd, strict=False)
+            self._logger.info(f"Fine-tune weights loaded from: {self.finetune}")
+        elif self.pretrained_coco and not self.resume and not self.finetune:
+            if self._model_cfg["backbone"] == "0.5x":
+                self._logger.warning("COCO pretrained not available for 0.5x model.")
+            else:
+                try:
+                    load_coco_pretrained(
+                        model,
+                        backbone_size=self._model_cfg["backbone"],
+                        fpn_channels=self._model_cfg["fpn_channels"],
+                        input_size=self.input_size[0],
+                        checkpoint_path=self.pretrained_ckpt,
+                    )
+                    self._logger.info("COCO pretrained weights loaded.")
+                except ValueError as e:
+                    self._logger.warning(f"COCO pretrained unavailable: {e}")
+
+    def _train_one_epoch(self, model, dataloader, optimizer, epoch, ema, scaler):
+        model.train()
+        use_amp = scaler is not None
+        loss_meter = AverageMeter("Loss")
+        raw_model = model.module if hasattr(model, "module") else model
+
+        for batch_idx, (images, gt_meta) in enumerate(dataloader):
+            images = images.to(self.device)
+
+            with torch.amp.autocast(self.device.type, enabled=use_amp):
+                output = model(images, gt_meta, epoch=epoch)
+                loss = output["loss"] / self.grad_accum
+
+            if torch.isnan(loss):
+                continue
+
+            if scaler:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+            if (batch_idx + 1) % self.grad_accum == 0 or (batch_idx + 1) == len(dataloader):
+                if scaler:
+                    scaler.unscale_(optimizer)
+                    nn.utils.clip_grad_norm_(raw_model.parameters(), 35.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    nn.utils.clip_grad_norm_(raw_model.parameters(), 35.0)
+                    optimizer.step()
+                optimizer.zero_grad()
+
+                if ema is not None:
+                    ema.update(raw_model)
+
+            loss_meter.update(output["loss"].item())
+
+            if (batch_idx + 1) % 10 == 0:
+                self._logger.info(
+                    f"  [{batch_idx+1}/{len(dataloader)}] Loss: {loss_meter.avg:.4f}"
+                )
+
+        return {"loss": loss_meter.avg}
+
+    @torch.no_grad()
+    def _validate(self, model, dataloader, ema, class_names):
+        eval_model = ema.ema if ema is not None else model
+        eval_model.eval()
+
+        loss_meter = AverageMeter("Loss")
+        all_preds, all_gts = [], []
+
+        for images, gt_meta in dataloader:
+            images = images.to(self.device)
+            out = eval_model(images, gt_meta, epoch=0, compute_loss=True)
+            loss_meter.update(out["loss"].item())
+
+            results = eval_model.predict(images, None, score_thr=0.05, nms_thr=0.6)
+            for i, (dets, lbs) in enumerate(results):
+                gt_boxes = gt_meta["gt_bboxes"][i]
+                gt_labels = gt_meta["gt_labels"][i]
+
+                if dets is not None and dets.numel() > 0:
+                    boxes_np = dets[:, :4].cpu().numpy()
+                    scores_np = dets[:, 4].cpu().numpy()
+                    lbs_np = lbs.cpu().numpy()
+                else:
+                    boxes_np = np.zeros((0, 4), dtype=np.float32)
+                    scores_np = np.zeros(0, dtype=np.float32)
+                    lbs_np = np.zeros(0, dtype=np.int64)
+
+                all_preds.append({"boxes": boxes_np, "scores": scores_np, "labels": lbs_np})
+                all_gts.append({"boxes": gt_boxes, "labels": gt_labels})
+
+        num_cls = len(class_names) if class_names else 10
+        map_results = compute_map(all_preds, all_gts, iou_threshold=0.5, num_classes=num_cls)
+        map50 = map_results["mAP"]
+
+        self._logger.info(
+            f"  Val Loss: {loss_meter.avg:.4f} | mAP@0.5: {map50:.4f}"
+        )
+
+        model.train()
+        return loss_meter.avg, map50
