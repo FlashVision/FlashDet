@@ -11,7 +11,7 @@ Reference:
 """
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -223,14 +223,49 @@ class OBBHead(nn.Module):
             return (angle_idx.float() / self.angle_bins - 0.5) * self.angle_range
         return torch.tanh(angle_pred.squeeze(-1)) * (self.angle_range / 2)
 
+    def _build_grid(self, feats: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Build anchor grid points and their strides for all feature levels."""
+        device = feats[0].device
+        all_points = []
+        all_strides = []
+        for feat, stride in zip(feats, self.strides):
+            _, _, h, w = feat.shape
+            y, x = torch.meshgrid(
+                torch.arange(h, dtype=torch.float32, device=device) * stride + stride / 2,
+                torch.arange(w, dtype=torch.float32, device=device) * stride + stride / 2,
+                indexing="ij",
+            )
+            points = torch.stack([x.flatten(), y.flatten()], dim=-1)
+            strides_t = torch.full((points.shape[0],), stride, dtype=torch.float32, device=device)
+            all_points.append(points)
+            all_strides.append(strides_t)
+        return torch.cat(all_points, dim=0), torch.cat(all_strides, dim=0)
+
+    def _dfl_decode(self, reg_pred: torch.Tensor) -> torch.Tensor:
+        """Decode DFL distribution predictions to distances (left, top, right, bottom)."""
+        B, N, _ = reg_pred.shape
+        reg_pred = reg_pred.reshape(B, N, 4, self.reg_max + 1)
+        project = torch.linspace(0, self.reg_max, self.reg_max + 1, device=reg_pred.device)
+        dist = F.softmax(reg_pred, dim=-1) @ project
+        return dist
+
     def get_obb_bboxes(
         self,
         preds: Dict[str, torch.Tensor],
         img_shape: Tuple[int, int],
         score_thr: float = 0.3,
         nms_thr: float = 0.5,
+        feats: List[torch.Tensor] = None,
     ) -> List[Dict]:
         """Decode predictions to OBB detections with rotated NMS.
+
+        Args:
+            preds: Dict with 'cls', 'reg', 'angle' tensors from forward().
+            img_shape: (H, W) of the input image.
+            score_thr: Confidence threshold for filtering.
+            nms_thr: IoU threshold for rotated NMS.
+            feats: Original feature maps (needed for grid construction).
+                   If None, grids are reconstructed from img_shape and strides.
 
         Returns list of dicts (one per image) with 'boxes', 'scores', 'labels'.
         """
@@ -238,6 +273,30 @@ class OBBHead(nn.Module):
         reg_preds = preds["reg"]
         angle_preds = preds["angle"]
         B = cls_preds.shape[0]
+        device = cls_preds.device
+        img_h, img_w = img_shape
+
+        if feats is not None:
+            grid_points, grid_strides = self._build_grid(feats)
+        else:
+            all_points = []
+            all_strides = []
+            for stride in self.strides:
+                h = img_h // stride
+                w = img_w // stride
+                y, x = torch.meshgrid(
+                    torch.arange(h, dtype=torch.float32, device=device) * stride + stride / 2,
+                    torch.arange(w, dtype=torch.float32, device=device) * stride + stride / 2,
+                    indexing="ij",
+                )
+                points = torch.stack([x.flatten(), y.flatten()], dim=-1)
+                strides_t = torch.full((points.shape[0],), stride, dtype=torch.float32, device=device)
+                all_points.append(points)
+                all_strides.append(strides_t)
+            grid_points = torch.cat(all_points, dim=0)
+            grid_strides = torch.cat(all_strides, dim=0)
+
+        distances = self._dfl_decode(reg_preds)
 
         results = []
         for b in range(B):
@@ -247,21 +306,31 @@ class OBBHead(nn.Module):
 
             if not keep_mask.any():
                 results.append({
-                    "boxes": torch.zeros(0, 5, device=cls_preds.device),
-                    "scores": torch.zeros(0, device=cls_preds.device),
-                    "labels": torch.zeros(0, dtype=torch.long, device=cls_preds.device),
+                    "boxes": torch.zeros(0, 5, device=device),
+                    "scores": torch.zeros(0, device=device),
+                    "labels": torch.zeros(0, dtype=torch.long, device=device),
                 })
                 continue
 
             kept_scores = max_scores[keep_mask]
             kept_labels = labels[keep_mask]
             kept_angles = self.decode_angle(angle_preds[b, keep_mask])
+            kept_dist = distances[b, keep_mask]
+            kept_points = grid_points[keep_mask]
+            kept_strides = grid_strides[keep_mask]
 
-            N_kept = kept_scores.shape[0]
-            cx = torch.zeros(N_kept, device=cls_preds.device)
-            cy = torch.zeros(N_kept, device=cls_preds.device)
-            w = torch.ones(N_kept, device=cls_preds.device) * 10
-            h = torch.ones(N_kept, device=cls_preds.device) * 10
+            left = kept_dist[:, 0] * kept_strides
+            top = kept_dist[:, 1] * kept_strides
+            right = kept_dist[:, 2] * kept_strides
+            bottom = kept_dist[:, 3] * kept_strides
+
+            cx = kept_points[:, 0] + (right - left) / 2
+            cy = kept_points[:, 1] + (bottom - top) / 2
+            w = (left + right).clamp(min=1.0)
+            h = (top + bottom).clamp(min=1.0)
+
+            cx = cx.clamp(0, img_w)
+            cy = cy.clamp(0, img_h)
 
             obb_boxes = torch.stack([cx, cy, w, h, kept_angles], dim=-1)
 
@@ -274,12 +343,12 @@ class OBBHead(nn.Module):
                 keep_idx = rotated_nms(c_boxes, c_scores, nms_thr)
                 final_boxes.append(c_boxes[keep_idx])
                 final_scores.append(c_scores[keep_idx])
-                final_labels.append(torch.full((keep_idx.shape[0],), c.item(), dtype=torch.long, device=cls_preds.device))
+                final_labels.append(torch.full((keep_idx.shape[0],), c.item(), dtype=torch.long, device=device))
 
             results.append({
-                "boxes": torch.cat(final_boxes) if final_boxes else torch.zeros(0, 5, device=cls_preds.device),
-                "scores": torch.cat(final_scores) if final_scores else torch.zeros(0, device=cls_preds.device),
-                "labels": torch.cat(final_labels) if final_labels else torch.zeros(0, dtype=torch.long, device=cls_preds.device),
+                "boxes": torch.cat(final_boxes) if final_boxes else torch.zeros(0, 5, device=device),
+                "scores": torch.cat(final_scores) if final_scores else torch.zeros(0, device=device),
+                "labels": torch.cat(final_labels) if final_labels else torch.zeros(0, dtype=torch.long, device=device),
             })
 
         return results

@@ -13,7 +13,6 @@ Reference:
     Lv et al., "DETRs Beat YOLOs on Real-time Object Detection", 2023.
 """
 
-import math
 import logging
 from typing import Dict, List, Optional, Tuple
 

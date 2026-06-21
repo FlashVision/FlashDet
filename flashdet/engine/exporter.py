@@ -172,7 +172,7 @@ class Exporter:
         try:
             import torch_tensorrt
 
-            example_input = torch.randn(max_batch_size, 3, inp_h, inp_w).to("cuda")
+            torch.randn(max_batch_size, 3, inp_h, inp_w).to("cuda")
             self.model.to("cuda")
 
             enabled_precisions = {torch.float32}
