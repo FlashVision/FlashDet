@@ -6,6 +6,7 @@ from .kd_loss import (
     LogitDistillationLoss,
     FeatureDistillationLoss,
 )
+from .varifocal_loss import VarifocalLoss, SigmoidFocalLoss
 
 __all__ = [
     "QualityFocalLoss",
@@ -18,4 +19,7 @@ __all__ = [
     "KnowledgeDistillationLoss",
     "LogitDistillationLoss",
     "FeatureDistillationLoss",
+    # Focal / Varifocal
+    "VarifocalLoss",
+    "SigmoidFocalLoss",
 ]

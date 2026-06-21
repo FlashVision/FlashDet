@@ -5,13 +5,16 @@ from .backbone import ShuffleNetV2
 from .neck import GhostPAN, GhostBottleneck, GhostModule
 
 # Head
-from .head import FlashDetHead, SimpleConvHead, Integral
+from .head import FlashDetHead, SimpleConvHead, Integral, OBBHead
 
 # Assignment
 from .assignment import DynamicSoftLabelAssigner, AssignResult
 
 # Detector
 from .detector import FlashDet, build_model, load_coco_pretrained
+
+# Architectures
+from .architectures import DETR, RTDETR, YOLOv9, YOLOv10, YOLOv11, GroundingDINO
 
 # LoRA / QLoRA
 from .lora import (
@@ -31,6 +34,7 @@ __all__ = [
     "FlashDetHead",
     "SimpleConvHead",
     "Integral",
+    "OBBHead",
     # Assignment
     "DynamicSoftLabelAssigner",
     "AssignResult",
@@ -38,6 +42,13 @@ __all__ = [
     "FlashDet",
     "build_model",
     "load_coco_pretrained",
+    # Architectures
+    "DETR",
+    "RTDETR",
+    "YOLOv9",
+    "YOLOv10",
+    "YOLOv11",
+    "GroundingDINO",
     # LoRA / QLoRA
     "apply_lora",
     "apply_qlora",

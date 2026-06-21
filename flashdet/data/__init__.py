@@ -1,6 +1,7 @@
 from .dataset import PPEDataset, collate_fn
 from .dataloader import create_dataloader, create_train_val_loaders
 from .transforms import TrainTransform, ValTransform, InferenceTransform
+from .augmentations import Mosaic, MixUp, CopyPaste
 from .prepare import (
     convert_yolo_to_coco,
     convert_voc_to_coco,
@@ -18,6 +19,9 @@ __all__ = [
     "TrainTransform",
     "ValTransform",
     "InferenceTransform",
+    "Mosaic",
+    "MixUp",
+    "CopyPaste",
     "convert_yolo_to_coco",
     "convert_voc_to_coco",
     "convert_supervisely_to_coco",
