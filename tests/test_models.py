@@ -3,7 +3,7 @@
 import torch
 import pytest
 from flashdet.cfg import get_config
-from flashdet.models import build_model, FlashDet, apply_lora
+from flashdet.models import build_model, apply_lora
 
 
 @pytest.mark.parametrize("model_size", ["m-0.5x", "m", "m-1.5x"])

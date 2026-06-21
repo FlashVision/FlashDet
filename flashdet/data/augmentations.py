@@ -12,9 +12,8 @@ References:
 """
 
 import random
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
-import cv2
 import numpy as np
 
 
@@ -285,7 +284,7 @@ class CopyPaste:
 
         if new_boxes:
             result_boxes = np.array(new_boxes, dtype=np.float32) if isinstance(new_boxes[0], np.ndarray) else np.stack(new_boxes)
-            result_labels = np.array(new_labels, dtype=np.int64) if isinstance(new_labels[0], (int, np.integer)) else np.concatenate([np.atleast_1d(l) for l in new_labels])
+            result_labels = np.array(new_labels, dtype=np.int64) if isinstance(new_labels[0], (int, np.integer)) else np.concatenate([np.atleast_1d(lbl) for lbl in new_labels])
         else:
             result_boxes = np.zeros((0, 4), dtype=np.float32)
             result_labels = np.zeros((0,), dtype=np.int64)

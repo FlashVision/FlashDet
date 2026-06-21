@@ -265,7 +265,7 @@ class GroundingDINO(nn.Module):
         device = pred_logits.device
         B = pred_logits.shape[0]
 
-        total_cls, total_l1, total_giou = [], [], []
+        total_cls, total_l1, _total_giou = [], [], []
 
         for b in range(B):
             gt_b = torch.as_tensor(gt_meta["gt_bboxes"][b], dtype=torch.float32, device=device)

@@ -12,7 +12,6 @@ Reference:
     Carion et al., "End-to-End Object Detection with Transformers", ECCV 2020.
 """
 
-import math
 import logging
 from typing import Dict, List, Optional, Tuple
 
@@ -187,7 +186,7 @@ class HungarianMatcher(nn.Module):
     @staticmethod
     def _generalized_iou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
         """Pairwise GIoU between two sets of boxes (xyxy format)."""
-        N, M = boxes1.shape[0], boxes2.shape[0]
+        _N, _M = boxes1.shape[0], boxes2.shape[0]
 
         lt = torch.max(boxes1[:, None, :2], boxes2[None, :, :2])
         rb = torch.min(boxes1[:, None, 2:], boxes2[None, :, 2:])
