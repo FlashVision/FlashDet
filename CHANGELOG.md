@@ -27,3 +27,17 @@ All notable changes to FlashDet will be documented in this file.
 - GhostPAN neck
 - NanoDet-Plus detection head with DFL regression
 - Dynamic Soft Label Assignment
+
+## [1.1.0] — 2026-06-21
+
+### Added
+- **New Architectures** — DETR, RT-DETR, YOLOv9, YOLOv10, YOLOv11, GroundingDINO (via registry)
+- **OBB Head** — Oriented Bounding Box detection with rotated IoU and rotated NMS
+- **Varifocal Loss** — Improved focal loss weighting for better-quality predictions
+- **Data Augmentations** — Mosaic, MixUp, Copy-Paste augmentations with multi-image support
+- **Comprehensive Test Suite** — 163 tests covering all components (models, training, losses, augmentations, trackers, callbacks)
+
+### Fixed
+- **YOLOv10 PSA module** — Corrected attention matrix multiplication (`v @ attn.transpose(-2, -1)`)
+- **GroundingDINO TextEncoder** — Suppressed `enable_nested_tensor` PyTorch warning
+- **OBB Head decode** — Replaced dummy box placeholders with actual DFL-based bounding box decoding
