@@ -139,3 +139,120 @@ class Exporter:
         file_size = os.path.getsize(output_path) / (1024 * 1024)
         logger.info(f"Output: {output_path} ({file_size:.2f} MB)")
         return output_path
+
+    def export_tensorrt(
+        self,
+        output_path: str = "model.engine",
+        fp16: bool = True,
+        int8: bool = False,
+        max_batch_size: int = 1,
+        workspace_mb: int = 4096,
+    ) -> str:
+        """Export model to TensorRT engine via ONNX.
+
+        Tries ``torch_tensorrt`` first (direct PyTorch → TRT compilation).
+        Falls back to ``tensorrt`` ONNX parser if ``torch_tensorrt`` is
+        unavailable. Requires an intermediate ONNX export in the fallback
+        path.
+
+        Args:
+            output_path: Path for the output TensorRT engine file.
+            fp16: Enable FP16 precision.
+            int8: Enable INT8 precision (requires calibration data).
+            max_batch_size: Maximum batch size for the engine.
+            workspace_mb: TensorRT workspace size in MB.
+
+        Returns:
+            Path to the exported TensorRT engine file.
+        """
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        inp_h, inp_w = self.input_size if isinstance(self.input_size, tuple) else (self.input_size, self.input_size)
+
+        # Strategy 1: torch_tensorrt (preferred)
+        try:
+            import torch_tensorrt
+
+            example_input = torch.randn(max_batch_size, 3, inp_h, inp_w).to("cuda")
+            self.model.to("cuda")
+
+            enabled_precisions = {torch.float32}
+            if fp16:
+                enabled_precisions.add(torch.float16)
+            if int8:
+                enabled_precisions.add(torch.int8)
+
+            trt_model = torch_tensorrt.compile(
+                self.model,
+                inputs=[torch_tensorrt.Input(
+                    min_shape=(1, 3, inp_h, inp_w),
+                    opt_shape=(max_batch_size, 3, inp_h, inp_w),
+                    max_shape=(max_batch_size, 3, inp_h, inp_w),
+                    dtype=torch.float32,
+                )],
+                enabled_precisions=enabled_precisions,
+                workspace_size=workspace_mb * (1024 ** 2),
+                truncate_long_and_double=True,
+            )
+
+            torch_tensorrt.save(trt_model, output_path, output_format="torchscript")
+            logger.info(f"TensorRT engine exported via torch_tensorrt: {output_path}")
+            file_size = os.path.getsize(output_path) / (1024 * 1024)
+            logger.info(f"Output: {output_path} ({file_size:.2f} MB)")
+            return output_path
+
+        except ImportError:
+            logger.info("torch_tensorrt not available, trying native TensorRT ONNX path")
+
+        # Strategy 2: TensorRT via ONNX
+        try:
+            import tensorrt as trt
+
+            onnx_path = output_path.replace(".engine", ".onnx")
+            self.export_onnx(onnx_path, simplify=True, dynamic_batch=False)
+
+            trt_logger = trt.Logger(trt.Logger.WARNING)
+            builder = trt.Builder(trt_logger)
+            network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+            parser = trt.OnnxParser(network, trt_logger)
+
+            with open(onnx_path, "rb") as f:
+                if not parser.parse(f.read()):
+                    for i in range(parser.num_errors):
+                        logger.error(f"TensorRT ONNX parse error: {parser.get_error(i)}")
+                    raise RuntimeError("Failed to parse ONNX model for TensorRT")
+
+            config = builder.create_builder_config()
+            config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_mb * (1024 ** 2))
+
+            if fp16 and builder.platform_has_fast_fp16:
+                config.set_flag(trt.BuilderFlag.FP16)
+                logger.info("TensorRT FP16 mode enabled")
+            if int8 and builder.platform_has_fast_int8:
+                config.set_flag(trt.BuilderFlag.INT8)
+                logger.info("TensorRT INT8 mode enabled")
+
+            profile = builder.create_optimization_profile()
+            profile.set_shape(
+                "data",
+                (1, 3, inp_h, inp_w),
+                (max_batch_size, 3, inp_h, inp_w),
+                (max_batch_size, 3, inp_h, inp_w),
+            )
+            config.add_optimization_profile(profile)
+
+            engine_bytes = builder.build_serialized_network(network, config)
+            if engine_bytes is None:
+                raise RuntimeError("TensorRT engine build failed")
+
+            with open(output_path, "wb") as f:
+                f.write(engine_bytes)
+
+            file_size = os.path.getsize(output_path) / (1024 * 1024)
+            logger.info(f"TensorRT engine exported via ONNX: {output_path} ({file_size:.2f} MB)")
+            return output_path
+
+        except ImportError:
+            raise ImportError(
+                "Neither torch_tensorrt nor tensorrt is installed. "
+                "Install one of: pip install torch-tensorrt  OR  pip install tensorrt"
+            )

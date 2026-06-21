@@ -1,5 +1,6 @@
 from .nanodet_head import FlashDetHead, Integral, DepthwiseConvModule
 from .aux_head import SimpleConvHead
+from .obb_head import OBBHead
 from flashdet.registry import HEADS
 
 HEADS.register("FlashDetHead")(FlashDetHead)
@@ -9,5 +10,6 @@ __all__ = [
     "FlashDetHead",
     "Integral",
     "DepthwiseConvModule",
-    "SimpleConvHead"
+    "SimpleConvHead",
+    "OBBHead",
 ]
