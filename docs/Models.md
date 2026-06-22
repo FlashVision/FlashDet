@@ -2,13 +2,31 @@
 
 ## FlashDet (Default)
 
-Ultra-lightweight detector with ShuffleNetV2 backbone — the default model for production deployment.
+YOLO26-based lightweight detector — the default model for production deployment.
 
-| Model | Params | FP16 Size | mAP (COCO) | GPU Latency |
-|-------|--------|-----------|------------|-------------|
-| FlashDet-m-0.5x | 0.49M | ~1.2 MB | — | 3.8 ms |
-| FlashDet-m | 1.17M | ~2.6 MB | 27.0 | 5.3 ms |
-| FlashDet-m-1.5x | 2.44M | ~5.2 MB | 29.9 | 7.2 ms |
+| Model | Backbone | Inference Params | FP16 Size | Notes |
+|-------|----------|-----------------|-----------|-------|
+| **FlashDet-P** (Pico) | ShuffleNetV2-0.5x + GhostPAN | ~298K | **0.57 MB** | Sub-1MB, edge/MCU deployment |
+| **FlashDet-N** (Nano) | YOLOv11 (w=0.25, d=0.33) | ~1.06M | 2.01 MB | Lightweight |
+| **FlashDet-S** (Small) | YOLOv11 (w=0.50, d=0.33) | ~5.4M | 10.3 MB | Balanced |
+| **FlashDet-M** (Medium) | YOLOv11 (w=1.00, d=0.67) | ~18M | 34.3 MB | High accuracy |
+
+### FlashDet-P (Pico) — Sub-1MB Model
+
+FlashDet-P is designed for extreme edge deployment where model size must be under 1MB:
+
+- **ShuffleNetV2-0.5x** backbone (channel shuffle + depthwise, ImageNet pretrained)
+- **GhostPAN** neck with 64-channel output (Ghost modules for cheap features)
+- **Depthwise-separable E2E dual head** (replaces full convolutions with DW-conv + pointwise)
+- Same **STAL + ProgLoss** training recipe as larger FlashDet variants
+
+```python
+from flashdet.models.architectures.flashdet import FlashDet
+
+pico = FlashDet(num_classes=80, size="p")
+info = pico.get_model_info()
+print(f"Inference FP16 size: {info['inference_fp16_mb']:.2f} MB")  # 0.57 MB
+```
 
 ### Training
 
@@ -16,11 +34,10 @@ Ultra-lightweight detector with ShuffleNetV2 backbone — the default model for 
 from flashdet import Trainer
 
 trainer = Trainer(
-    model_size="m",          # "m-0.5x", "m", "m-1.5x"
+    model_size="p",          # "p" (Pico), "n", "s", "m"
     train_images="data/train",
     val_images="data/val",
     epochs=100,
-    pretrained_coco=True,
 )
 trainer.train()
 ```
@@ -299,8 +316,9 @@ results = model.predict(images, text_ids=text_ids, text_mask=text_mask, score_th
 
 | Use Case | Recommended Model | Why |
 |----------|-------------------|-----|
-| Mobile/Edge deployment | FlashDet-m-0.5x | Smallest, fastest |
-| General real-time | FlashDet-m or YOLOv10 | Good speed/accuracy |
+| MCU/Browser/Sub-1MB | FlashDet-P (Pico) | 0.57 MB FP16, depthwise efficient |
+| Mobile/Edge deployment | FlashDet-N (Nano) | 2 MB FP16, lightweight |
+| General real-time | FlashDet-S or YOLOv10 | Good speed/accuracy |
 | High accuracy | DETR or RT-DETR | Transformer-based |
 | No post-processing | YOLOv10 | NMS-free |
 | Open-vocabulary | GroundingDINO | Text-guided |

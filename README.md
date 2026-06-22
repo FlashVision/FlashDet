@@ -63,11 +63,18 @@ FlashDet ships with 7 detector architectures, all accessible via a unified API:
 
 ### FlashDet Model Sizes
 
-| Model | Width | Depth | Params |
-|---|---|---|---|
-| **FlashDet-N** | 0.25 | 0.33 | ~1.5M |
-| **FlashDet-S** | 0.50 | 0.33 | ~5.4M |
-| **FlashDet-M** | 1.00 | 0.67 | ~18M |
+| Model | Backbone | Params (Inference) | FP16 Size | Notes |
+|---|---|---|---|---|
+| **FlashDet-P** (Pico) | ShuffleNetV2-0.5x + GhostPAN | ~298K | **0.57 MB** | Sub-1MB, depthwise heads |
+| **FlashDet-N** (Nano) | YOLOv11 (w=0.25, d=0.33) | ~1.06M | 2.01 MB | Lightweight |
+| **FlashDet-S** (Small) | YOLOv11 (w=0.50, d=0.33) | ~5.4M | 10.3 MB | Balanced |
+| **FlashDet-M** (Medium) | YOLOv11 (w=1.00, d=0.67) | ~18M | 34.3 MB | High accuracy |
+
+**FlashDet-P (Pico)** is designed for extreme edge deployment (microcontrollers, mobile, browser). It uses:
+- **ShuffleNetV2-0.5x** backbone with ImageNet pretraining (channel shuffle + depthwise convolutions)
+- **GhostPAN** neck with 64-ch output (Ghost modules for cheap feature generation)
+- **Depthwise-separable E2E dual head** (DW-conv + pointwise instead of full convolutions)
+- Same STAL + ProgLoss training recipe as larger variants
 ---
 
 ## Installation
@@ -122,9 +129,13 @@ from flashdet.cfg import get_config
 config = get_config(num_classes=80)
 model = build_model(config, architecture="flashdet")  # or "detr", "yolov11", etc.
 
+# Build sub-1MB Pico model for edge deployment
+pico = FlashDet(num_classes=80, size="p")
+print(pico.get_model_info())  # inference_fp16_mb: 0.57
+
 # Train
 trainer = Trainer(
-    model_size="n",
+    model_size="p",   # "p" (Pico), "n", "s", "m", "l", "x"
     train_images="data/train",
     val_images="data/val",
     epochs=100,
@@ -144,8 +155,8 @@ exporter.export(output="model.onnx", simplify=True)
 ### CLI
 
 ```bash
-# Train
-flashdet train --model-size n --epochs 100 --device cuda \
+# Train (use --model-size p for Pico, n for Nano, s for Small, etc.)
+flashdet train --model-size p --epochs 100 --device cuda \
   --train-images data/train --val-images data/val
 
 # Predict
