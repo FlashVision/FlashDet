@@ -90,6 +90,48 @@ class SemiSupervisedTrainer(Trainer):
         self.strong_aug = strong_aug
         self.pseudo_nms_threshold = pseudo_nms_threshold
 
+    def train(self):
+        """Override to build teacher model and unlabeled data loader."""
+        cfg = self._config
+        if self.train_images:
+            cfg.data.train_images = self.train_images
+            cfg.data.train_annotations = os.path.join(self.train_images, "_annotations.coco.json")
+        if self.val_images:
+            cfg.data.val_images = self.val_images
+            cfg.data.val_annotations = os.path.join(self.val_images, "_annotations.coco.json")
+
+        class_names = self._resolve_class_names(cfg)
+        num_classes = len(class_names)
+
+        arch = self.architecture.lower()
+        if arch in ("flashdet", ""):
+            size_key = {"m": "n", "m-0.5x": "n", "m-1.5x": "s"}.get(self.model_size, "n")
+            self._teacher_model = FlashDet(
+                num_classes=num_classes, size=size_key, total_epochs=self.epochs,
+            ).to(self.device)
+        else:
+            cfg.model.num_classes = num_classes
+            self._teacher_model = build_model(cfg, architecture=arch).to(self.device)
+        self._teacher_model.eval()
+        for p in self._teacher_model.parameters():
+            p.requires_grad = False
+        self._logger.info("Semi-supervised teacher model created (EMA copy)")
+
+        if self.unlabeled_images:
+            from flashdet.data import create_dataloader
+            unsup_ann = os.path.join(self.unlabeled_images, "_annotations.coco.json")
+            if os.path.exists(unsup_ann):
+                self._unsup_loader = create_dataloader(
+                    img_dir=self.unlabeled_images, ann_file=unsup_ann,
+                    batch_size=self.batch_size, input_size=self.input_size,
+                    num_workers=self.workers, is_train=True,
+                )
+                self._logger.info(f"Unlabeled data: {len(self._unsup_loader.dataset)} images")
+            else:
+                self._logger.warning(f"No annotations at {unsup_ann}, running supervised only")
+
+        return super().train()
+
     @torch.no_grad()
     def _generate_pseudo_labels(
         self, teacher: nn.Module, images: torch.Tensor,

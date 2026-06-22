@@ -74,18 +74,26 @@ class KDTrainer(Trainer):
         self.kd_feature_layers = kd_feature_layers or ["stage2", "stage3", "stage4"]
         self._teacher_model = None
 
+    def train(self):
+        """Override to build teacher before starting the training loop."""
+        cfg = self._config
+        if self.train_images:
+            cfg.data.train_images = self.train_images
+            cfg.data.train_annotations = os.path.join(self.train_images, "_annotations.coco.json")
+        class_names = self._resolve_class_names(cfg)
+        num_classes = len(class_names)
+        self._teacher_model = self._build_teacher(num_classes)
+        return super().train()
+
     def _build_teacher(self, num_classes: int) -> nn.Module:
         """Build and freeze the teacher model."""
         arch = self.teacher_architecture.lower()
         if arch in ("flashdet", ""):
-            tcfg = MODEL_SIZE_MAP[self.teacher_size]
+            size_key = {"m": "n", "m-0.5x": "n", "m-1.5x": "s"}.get(self.teacher_size, "n")
             teacher = FlashDet(
                 num_classes=num_classes,
-                input_size=self.input_size,
-                backbone_size=tcfg["backbone"],
-                fpn_channels=tcfg["fpn_channels"],
-                pretrained=False,
-                use_aux_head=False,
+                size=size_key,
+                total_epochs=self.epochs,
             )
         else:
             from flashdet.cfg import get_config
@@ -142,20 +150,20 @@ class KDTrainer(Trainer):
             images = images.to(self.device)
 
             with torch.amp.autocast(self.device.type, enabled=use_amp):
-                student_out = model(images, gt_meta, epoch=epoch)
+                student_out = model(images, gt_meta, epoch=epoch, return_features=True)
                 det_loss = student_out["loss"]
 
                 with torch.no_grad():
-                    teacher_out = teacher(images, gt_meta, epoch=epoch)
+                    teacher_out = teacher(images, gt_meta, epoch=epoch, return_features=True)
 
                 kd_loss = torch.tensor(0.0, device=self.device)
-                s_logits = student_out.get("raw_logits")
-                t_logits = teacher_out.get("raw_logits")
+                s_logits = student_out.get("o2o_cls", student_out.get("preds"))
+                t_logits = teacher_out.get("o2o_cls", teacher_out.get("preds"))
                 if s_logits is not None and t_logits is not None:
                     kd_loss = kd_loss + self._kd_logit_loss(s_logits, t_logits)
 
-                s_feats = student_out.get("backbone_features", [])
-                t_feats = teacher_out.get("backbone_features", [])
+                s_feats = student_out.get("fpn_features", student_out.get("backbone_features", []))
+                t_feats = teacher_out.get("fpn_features", teacher_out.get("backbone_features", []))
                 if s_feats and t_feats and self.kd_feature_weight > 0:
                     kd_loss = kd_loss + self.kd_feature_weight * self._kd_feature_loss(s_feats, t_feats)
 

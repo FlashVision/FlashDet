@@ -294,13 +294,11 @@ class Trainer:
         # Build model
         arch = self.architecture.lower()
         if arch in ("flashdet", ""):
+            size_key = {"m": "n", "m-0.5x": "n", "m-1.5x": "s"}.get(self.model_size, "n")
             model = FlashDet(
                 num_classes=num_classes,
-                input_size=self.input_size,
-                backbone_size=self._model_cfg["backbone"],
-                fpn_channels=self._model_cfg["fpn_channels"],
-                pretrained=cfg.model.backbone_pretrained,
-                use_aux_head=True,
+                size=size_key,
+                total_epochs=self.epochs,
             ).to(self.device)
         else:
             cfg.model.num_classes = num_classes
