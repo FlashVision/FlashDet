@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Train FlashDet on PPE Detection Dataset.
+Train FlashDet — full-featured standalone training script.
 
 Usage:
     python train.py
     python train.py --epochs 200 --batch-size 32
-    python train.py --resume workspace/ppe_detector/checkpoint_last.pth
+    python train.py --resume workspace/flashdet_output/checkpoint_last.pth
+    python train.py --pretrained-coco --mosaic --mixup
 """
 
 import os
@@ -33,68 +34,10 @@ from flashdet.utils.torchtune_optim import (
     compile_model as torchtune_compile,
     log_memory_stats,
 )
+from flashdet.engine.core.musgd import build_musgd
 
-
-class ModelEMA:
-    """Exponential Moving Average of model weights.
-
-    Uses an adaptive decay schedule so the EMA converges quickly even with
-    small datasets (few batches/epoch).  The effective decay ramps from ~0
-    (EMA = model copy) up to *target_decay* over the first few thousand
-    updates, using:
-
-        effective_decay = min(target_decay, (1 + n) / (warmup + n))
-
-    With the default warmup=2000, the decay reaches 0.9998 at ~10 000
-    updates.  For a 30-batch/epoch dataset, this means the EMA is already
-    well-converged after ~50 epochs instead of lagging behind for hundreds.
-    """
-    def __init__(self, model: torch.nn.Module, decay: float = 0.9998,
-                 warmup: int = 2000):
-        self.ema = copy.deepcopy(model)
-        self.ema.eval()
-        self.target_decay = decay
-        self.warmup = warmup
-        self.num_updates = 0
-        for p in self.ema.parameters():
-            p.requires_grad_(False)
-
-    @property
-    def decay(self):
-        return min(self.target_decay,
-                   (1 + self.num_updates) / (self.warmup + self.num_updates))
-
-    @torch.no_grad()
-    def update(self, model: torch.nn.Module):
-        self.num_updates += 1
-        d = self.decay
-        for ema_p, model_p in zip(self.ema.parameters(), model.parameters()):
-            ema_p.data.mul_(d).add_(model_p.data, alpha=1.0 - d)
-        for ema_b, model_b in zip(self.ema.buffers(), model.buffers()):
-            ema_b.copy_(model_b)
-
-    def state_dict(self):
-        return {
-            "ema_state": self.ema.state_dict(),
-            "target_decay": self.target_decay,
-            "warmup": self.warmup,
-            "num_updates": self.num_updates,
-        }
-
-    def load_state_dict(self, state: dict):
-        missing, unexpected = self.ema.load_state_dict(
-            state["ema_state"], strict=False
-        )
-        if missing:
-            import logging
-            logging.getLogger(__name__).debug(
-                "EMA missing keys (%d): %s%s",
-                len(missing), missing[:3], "..." if len(missing) > 3 else ""
-            )
-        self.target_decay = state.get("target_decay",
-                                      state.get("decay", self.target_decay))
-        self.warmup = state.get("warmup", self.warmup)
-        self.num_updates = state.get("num_updates", 0)
+from flashdet.engine.core.ema import ModelEMA
+from flashdet.analytics.plots import plot_training_curves
 
 
 def _make_color_palette(n: int):
@@ -189,6 +132,122 @@ def save_visualization(model, images, gt_meta, save_path, epoch, batch_idx, devi
     Image.fromarray(panel_rgb).save(latest_path, quality=95)
 
 
+def _save_training_plots(history, plots_dir):
+    """Generate and save all training graphs."""
+    plt = None
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+
+    val_epochs = history["val_epoch"]
+
+    # 1. Loss curves (train vs val)
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+
+    # -- Top row: main metrics --
+    ax = axes[0, 0]
+    ax.plot(history["epoch"], history["train_loss"], "b-", label="Train Loss", linewidth=1.5)
+    if history["val_loss"]:
+        ax.plot(val_epochs, history["val_loss"], "r-o", markersize=3, label="Val Loss", linewidth=1.5)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title("Total Loss")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[0, 1]
+    if history["mAP@0.5"]:
+        ax.plot(val_epochs, history["mAP@0.5"], "g-o", markersize=3, linewidth=1.5)
+        best_idx = max(range(len(history["mAP@0.5"])), key=lambda i: history["mAP@0.5"][i])
+        ax.axhline(y=history["mAP@0.5"][best_idx], color="g", linestyle="--", alpha=0.5)
+        ax.annotate(f'Best: {history["mAP@0.5"][best_idx]:.4f}',
+                    xy=(val_epochs[best_idx], history["mAP@0.5"][best_idx]),
+                    fontsize=9, color="green", fontweight="bold")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("mAP@0.5")
+    ax.set_title("mAP@0.5")
+    ax.set_ylim(bottom=0)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[0, 2]
+    ax.plot(history["epoch"], history["lr"], "m-", linewidth=1.5)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Learning Rate")
+    ax.set_title("Learning Rate Schedule")
+    ax.grid(True, alpha=0.3)
+
+    # -- Bottom row: sub-losses --
+    ax = axes[1, 0]
+    ax.plot(history["epoch"], history["train_box"], "b-", label="Train Box", linewidth=1.5)
+    if history["val_box"]:
+        ax.plot(val_epochs, history["val_box"], "r-o", markersize=3, label="Val Box", linewidth=1.5)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title("Box Loss (CIoU)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 1]
+    ax.plot(history["epoch"], history["train_cls"], "b-", label="Train Cls", linewidth=1.5)
+    if history["val_cls"]:
+        ax.plot(val_epochs, history["val_cls"], "r-o", markersize=3, label="Val Cls", linewidth=1.5)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title("Classification Loss (BCE)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 2]
+    ax.plot(history["epoch"], history["train_l1"], "b-", label="Train L1", linewidth=1.5)
+    if history["val_l1"]:
+        ax.plot(val_epochs, history["val_l1"], "r-o", markersize=3, label="Val L1", linewidth=1.5)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title("L1 Distance Loss")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    fig.suptitle("FlashDet Training Progress", fontsize=14, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(os.path.join(plots_dir, "training_curves.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # 2. Standalone mAP plot (larger, easier to read)
+    if history["mAP@0.5"]:
+        fig2, ax2 = plt.subplots(figsize=(8, 5))
+        ax2.plot(val_epochs, history["mAP@0.5"], "g-o", markersize=4, linewidth=2)
+        ax2.fill_between(val_epochs, 0, history["mAP@0.5"], alpha=0.1, color="green")
+        best_val = max(history["mAP@0.5"])
+        ax2.axhline(y=best_val, color="red", linestyle="--", alpha=0.5, label=f"Best: {best_val:.4f}")
+        ax2.set_xlabel("Epoch", fontsize=12)
+        ax2.set_ylabel("mAP@0.5", fontsize=12)
+        ax2.set_title("Detection mAP@0.5", fontsize=14)
+        ax2.set_ylim(bottom=0)
+        ax2.legend(fontsize=11)
+        ax2.grid(True, alpha=0.3)
+        fig2.tight_layout()
+        fig2.savefig(os.path.join(plots_dir, "mAP_curve.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig2)
+
+
+def _save_training_csv(history, csv_path):
+    """Save training history to a CSV file."""
+    import csv
+    max_len = max(len(v) for v in history.values())
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(history.keys())
+        for i in range(max_len):
+            row = []
+            for key in history:
+                vals = history[key]
+                row.append(f"{vals[i]:.6f}" if i < len(vals) else "")
+            writer.writerow(row)
+
+
 def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_dir=None, config=None, ema=None,
                     class_names=None, colors=None, scaler=None, grad_accum=1):
     """Train for one epoch with optional AMP and gradient accumulation."""
@@ -196,9 +255,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
     use_amp = scaler is not None
 
     loss_meter = AverageMeter("Loss")
-    qfl_meter = AverageMeter("QFL")
-    bbox_meter = AverageMeter("BBox")
-    dfl_meter = AverageMeter("DFL")
+    sub_meters = {}
 
     start_time = time.time()
     vis_dir = os.path.join(save_dir, "visualizations") if save_dir else None
@@ -212,7 +269,6 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
         except OSError:
             pass
 
-    # Access underlying model for DataParallel
     raw_model = model.module if hasattr(model, 'module') else model
 
     zero_pos_batches = 0
@@ -225,9 +281,11 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
             output = model(images, gt_meta, epoch=epoch)
             loss = output["loss"] / grad_accum
 
-        loss_states = output["loss_states"]
+        loss_states = output.get("loss_states", {})
         total_batches += 1
-        if loss_states["num_pos"].item() == 0:
+        num_pos = loss_states.get("o2m_pos", loss_states.get("num_pos"))
+        num_pos_val = num_pos.item() if hasattr(num_pos, "item") else (num_pos or 0)
+        if num_pos_val == 0:
             zero_pos_batches += 1
 
         if torch.isnan(loss):
@@ -239,7 +297,6 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
         else:
             loss.backward()
 
-        # Step optimizer every grad_accum batches (or on last batch)
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(dataloader):
             if scaler:
                 scaler.unscale_(optimizer)
@@ -254,20 +311,23 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
             if ema is not None:
                 ema.update(raw_model)
         
-        # Update meters (use unscaled loss for logging; `loss` is divided by grad_accum for backward)
         loss_meter.update(output["loss"].item())
-        qfl_meter.update(loss_states["loss_qfl"].item())
-        bbox_meter.update(loss_states["loss_bbox"].item())
-        dfl_meter.update(loss_states["loss_dfl"].item())
+        for key, val in loss_states.items():
+            if "pos" in key:
+                continue
+            if key not in sub_meters:
+                sub_meters[key] = AverageMeter(key)
+            v = val.item() if hasattr(val, "item") else val
+            sub_meters[key].update(v)
         
-        # Save visualization every 20 batches for more frequent updates
-        if vis_dir and (batch_idx + 1) % 20 == 0:
+        # Save visualization every 20 batches, or on the last batch of the epoch
+        is_last_batch = (batch_idx + 1) == len(dataloader)
+        if vis_dir and ((batch_idx + 1) % 20 == 0 or is_last_batch):
             try:
                 vis_path = os.path.join(vis_dir, f"epoch{epoch}_batch{batch_idx+1}.jpg")
                 save_visualization(model, images, gt_meta, vis_path, epoch, batch_idx + 1, device, config,
                                    class_names=class_names, colors=colors)
                 
-                # Clean up old visualizations (keep only latest 10 images)
                 vis_files = sorted([f for f in os.listdir(vis_dir) if f.endswith('.jpg') and f != 'latest_visualization.jpg'])
                 if len(vis_files) > 10:
                     for old_file in vis_files[:-10]:
@@ -278,17 +338,17 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
             except Exception as e:
                 logger.warning(f"Failed to save visualization: {e}")
         
-        # Log every 10 batches for real-time dashboard updates
+        # Log every 10 batches
         if (batch_idx + 1) % 10 == 0:
             elapsed = time.time() - start_time
+            sub_str = ", ".join(f"{k}: {m.avg:.4f}" for k, m in sub_meters.items())
+            pos_str = f" Pos: {num_pos_val:.0f}" if num_pos is not None else ""
             logger.info(
                 f"Epoch [{epoch}] Batch [{batch_idx+1}/{len(dataloader)}] "
-                f"Loss: {loss_meter.avg:.4f} (QFL: {qfl_meter.avg:.4f}, "
-                f"BBox: {bbox_meter.avg:.4f}, DFL: {dfl_meter.avg:.4f}) "
-                f"Pos: {loss_states['num_pos'].item():.0f} "
-                f"Time: {elapsed:.1f}s"
+                f"Loss: {loss_meter.avg:.4f}"
+                + (f" ({sub_str})" if sub_str else "")
+                + f"{pos_str} Time: {elapsed:.1f}s"
             )
-            # Flush to ensure dashboard sees updates immediately
             sys.stdout.flush()
     
     if zero_pos_batches > 0:
@@ -298,12 +358,10 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
             f"— loss WILL NOT decrease. Use --pretrained-coco or train without --lora."
         )
 
-    return {
-        "loss": loss_meter.avg,
-        "loss_qfl": qfl_meter.avg,
-        "loss_bbox": bbox_meter.avg,
-        "loss_dfl": dfl_meter.avg
-    }
+    result = {"loss": loss_meter.avg}
+    for key, meter in sub_meters.items():
+        result[key] = meter.avg
+    return result
 
 
 @torch.no_grad()
@@ -312,6 +370,8 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None):
     Validate model — computes both loss and mAP@0.5.
 
     Uses EMA weights when provided (they give better accuracy).
+    All architectures now support ``compute_loss=True`` so validation
+    runs in eval mode (correct BatchNorm behaviour).
     Main model is always restored to train() mode on exit.
 
     Returns:
@@ -321,9 +381,7 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None):
     eval_model.eval()
 
     loss_meter = AverageMeter("Loss")
-    qfl_meter  = AverageMeter("QFL")
-    bbox_meter = AverageMeter("BBox")
-    dfl_meter  = AverageMeter("DFL")
+    sub_meters = {}
 
     all_preds = []
     all_gts   = []
@@ -331,20 +389,23 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None):
     for images, gt_meta in dataloader:
         images = images.to(device)
 
-        # ---- loss pass ----
         out = eval_model(images, gt_meta, epoch=0, compute_loss=True)
-        loss_states = out["loss_states"]
-        loss_meter.update(out["loss"].item())
-        qfl_meter.update(loss_states["loss_qfl"].item())
-        bbox_meter.update(loss_states["loss_bbox"].item())
-        dfl_meter.update(loss_states["loss_dfl"].item())
 
-        # ---- prediction pass for mAP (low threshold to capture all detections) ----
+        if "loss" in out:
+            loss_meter.update(out["loss"].item())
+        loss_states = out.get("loss_states", {})
+        for key, val in loss_states.items():
+            if "pos" in key:
+                continue
+            if key not in sub_meters:
+                sub_meters[key] = AverageMeter(key)
+            v = val.item() if hasattr(val, "item") else val
+            sub_meters[key].update(v)
+
         results = eval_model.predict(images, None, score_thr=0.05, nms_thr=0.6)
-
         for i, (dets, lbs) in enumerate(results):
-            gt_boxes  = gt_meta["gt_bboxes"][i]   # np.ndarray [N,4]
-            gt_labels = gt_meta["gt_labels"][i]   # np.ndarray [N]
+            gt_boxes  = gt_meta["gt_bboxes"][i]
+            gt_labels = gt_meta["gt_labels"][i]
 
             if dets is not None and dets.numel() > 0:
                 boxes_np  = dets[:, :4].cpu().numpy()
@@ -363,7 +424,7 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None):
     map_results = compute_map(all_preds, all_gts, iou_threshold=0.5, num_classes=num_cls)
     map50 = map_results["mAP"]
 
-    # Per-class AP summary (only classes that have GT instances)
+    # Per-class AP summary
     ap_per_cls = map_results.get("AP_per_class", {})
     if class_names and ap_per_cls:
         per_cls_str = "  ".join(
@@ -373,16 +434,17 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None):
         )
         logger.info(f"  AP per class: {per_cls_str}")
 
+    sub_str = ", ".join(f"{k}: {m.avg:.4f}" for k, m in sub_meters.items())
     logger.info(
-        f"Validation - Loss: {loss_meter.avg:.4f} "
-        f"(QFL: {qfl_meter.avg:.4f}, BBox: {bbox_meter.avg:.4f}, DFL: {dfl_meter.avg:.4f}) "
-        f"| mAP@0.5: {map50:.4f}"
+        f"Validation - Loss: {loss_meter.avg:.4f}"
+        + (f" ({sub_str})" if sub_str else "")
+        + f" | mAP@0.5: {map50:.4f}"
     )
 
-    # Always restore main model to train mode
     model.train()
 
-    return loss_meter.avg, map50
+    val_sub = {k: m.avg for k, m in sub_meters.items()}
+    return loss_meter.avg, map50, val_sub
 
 
 def main():
@@ -391,15 +453,20 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     parser.add_argument("--workers", type=int, default=4, help="Data workers")
-    parser.add_argument("--save-dir", default="workspace/ppe_detector", help="Save directory")
+    parser.add_argument("--save-dir", default="workspace/flashdet_output", help="Save directory")
     parser.add_argument("--resume", default=None, help="Resume from checkpoint")
     parser.add_argument("--device", default="cuda", help="Device")
     parser.add_argument("--warmup-epochs", type=int, default=5, help="Warmup epochs")
     parser.add_argument("--patience", type=int, default=50,
                         help="Early stopping patience (epochs without mAP improvement). 0 disables.")
-    parser.add_argument("--model-size", default="m", choices=["m", "m-1.5x", "m-0.5x"],
-                        help="Model size: m (~1.17M params), m-1.5x (~2.44M params), m-0.5x (~0.5M ultra-lite)")
+    parser.add_argument("--model-size", default="n", choices=["n", "s", "m", "l", "x"],
+                        help="Model size: n (~1.5M), s (~5.4M), m (~18M), l, x")
+    parser.add_argument("--architecture", default="flashdet",
+                        choices=["flashdet", "detr", "rt-detr", "yolov9", "yolov10", "yolov11", "grounding-dino"],
+                        help="Detection architecture (default: flashdet)")
     parser.add_argument("--input-size", type=int, default=320, help="Input image size (320 or 416)")
+    parser.add_argument("--optimizer", default="musgd", choices=["musgd", "adamw", "sgd"],
+                        help="Optimizer: musgd (YOLO26 default), adamw, sgd")
     parser.add_argument("--finetune", default=None,
                         help="Path to a previous model checkpoint (inference or training) to fine-tune from. "
                              "Loads model weights only — optimizer/scheduler start fresh from epoch 0. "
@@ -463,18 +530,18 @@ def main():
     lora_group.add_argument("--qlora-dtype", default="int8", choices=["int8", "nf4"],
                             help="QLoRA quantization dtype (int8=no deps, nf4=requires bitsandbytes)")
 
+    # --- Augmentations ---
+    aug_group = parser.add_argument_group("augmentations", "Advanced multi-image augmentations")
+    aug_group.add_argument("--mosaic", action="store_true",
+                           help="Enable 4-image mosaic augmentation (richer spatial context)")
+    aug_group.add_argument("--mixup", action="store_true",
+                           help="Enable MixUp augmentation (image blending)")
+    aug_group.add_argument("--copy-paste", action="store_true",
+                           help="Enable Copy-Paste augmentation (instance copying)")
+
     args = parser.parse_args()
     
-    # Map model size to backbone config (matching official FlashDet specs)
-    # Official FlashDet-m:     1.0x backbone, 96 fpn  -> ~1.17M params, 2.3MB FP16
-    # Official FlashDet-m-1.5x: 1.5x backbone, 128 fpn -> ~2.44M params, 4.7MB FP16
-    # Custom FlashDet-m-0.5x:  0.5x backbone, 96 fpn  -> ~0.49M params (ultra-lite)
-    MODEL_SIZE_MAP = {
-        "m": {"backbone": "1.0x", "fpn_channels": 96},        # Official FlashDet-m
-        "m-1.5x": {"backbone": "1.5x", "fpn_channels": 128},  # Official FlashDet-m-1.5x
-        "m-0.5x": {"backbone": "0.5x", "fpn_channels": 96},   # Ultra-lite version
-    }
-    model_cfg = MODEL_SIZE_MAP[args.model_size]
+    model_size = args.model_size
     input_size = (args.input_size, args.input_size)
     
     # Setup
@@ -515,10 +582,10 @@ def main():
     num_classes = len(class_names)
 
     logger.info("=" * 60)
-    logger.info("FlashDet Training")
+    logger.info("FlashDet Training (YOLO26-based)")
     logger.info("=" * 60)
     logger.info(f"Device: {device}")
-    logger.info(f"Model Size: {args.model_size} (backbone: {model_cfg['backbone']}, fpn: {model_cfg['fpn_channels']})")
+    logger.info(f"Model Size: FlashDet-{model_size.upper()}")
     logger.info(f"Input Size: {input_size}")
     logger.info(f"Epochs: {args.epochs}")
     logger.info(f"Batch Size: {args.batch_size}")
@@ -530,9 +597,11 @@ def main():
     data_root = os.path.dirname(os.path.normpath(config.data.train_images))
     if not verify_dataset(data_root):
         logger.error("Dataset not found!")
-        logger.error("Please download the dataset first:")
-        logger.error("  Option 1: Download from Roboflow")
-        logger.error("  Option 2: Download from Kaggle using: python src/data/prepare.py")
+        logger.error("Please download a dataset first:")
+        logger.error("  flashdet download --list                     # see available datasets")
+        logger.error("  flashdet download --dataset sample           # tiny test dataset")
+        logger.error("  flashdet download --dataset coco2017         # full COCO 2017")
+        logger.error("  python scripts/prepare_data.py               # convert custom data")
         sys.exit(1)
     
     # Create data loaders
@@ -543,45 +612,60 @@ def main():
         batch_size=args.batch_size,
         input_size=input_size,
         num_workers=args.workers,
-        is_train=True
+        is_train=True,
+        mosaic=args.mosaic,
+        mixup=args.mixup,
+        copy_paste=getattr(args, "copy_paste", False),
     )
-    
+
     val_loader = create_dataloader(
         img_dir=config.data.val_images,
         ann_file=config.data.val_annotations,
         batch_size=args.batch_size,
         input_size=input_size,
         num_workers=args.workers,
-        is_train=False
+        is_train=False,
     )
     
     logger.info(f"Train batches: {len(train_loader)}")
     logger.info(f"Val batches: {len(val_loader)}")
+    aug_flags = []
+    if args.mosaic:
+        aug_flags.append("Mosaic")
+    if args.mixup:
+        aug_flags.append("MixUp")
+    if getattr(args, "copy_paste", False):
+        aug_flags.append("CopyPaste")
+    if aug_flags:
+        logger.info(f"Augmentations: {', '.join(aug_flags)}")
     
     # Create model
     logger.info("\nBuilding model...")
-    model = FlashDet(
-        num_classes=num_classes,
-        input_size=input_size,
-        backbone_size=model_cfg["backbone"],
-        fpn_channels=model_cfg["fpn_channels"],
-        pretrained=config.model.backbone_pretrained,
-        use_aux_head=True
-    ).to(device)
-    
-    info = model.get_model_info()
-    logger.info(f"Model: {info['name']}")
-    logger.info(f"Inference params: {info['inference_params']:,} "
-                f"({info['inference_params_mb']:.2f} MB FP32, "
-                f"{info['inference_fp16_mb']:.2f} MB FP16)")
-    logger.info(f"Training params:  {info['total_params']:,} "
-                f"({info['params_mb']:.2f} MB, incl. aux head)")
-    logger.info(f"Input Size: {info['input_size']}")
+    arch = getattr(args, "architecture", "flashdet")
+    if arch in ("flashdet", ""):
+        model = FlashDet(
+            num_classes=num_classes,
+            size=model_size,
+            total_epochs=args.epochs,
+        ).to(device)
 
-    # Warn if backbone pretrained weights failed to load
-    raw_model_tmp = model.module if hasattr(model, 'module') else model
-    if hasattr(raw_model_tmp.backbone, 'pretrained_loaded') and not raw_model_tmp.backbone.pretrained_loaded:
-        logger.warning("Backbone is using RANDOM weights (pretrained download failed).")
+        info = model.get_model_info()
+        logger.info(f"Model: {info['name']}")
+        logger.info(f"Inference params: {info['inference_params']:,} "
+                    f"({info['inference_params_mb']:.2f} MB FP32, "
+                    f"{info['inference_fp16_mb']:.2f} MB FP16)")
+        logger.info(f"Training params:  {info['total_params']:,} "
+                    f"({info['params_mb']:.2f} MB, incl. o2m head)")
+    else:
+        from flashdet.models.detector import build_model
+        config.model.num_classes = num_classes
+        model = build_model(config, architecture=arch).to(device)
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info(f"Architecture: {arch}")
+        logger.info(f"Total params: {total_params:,} | Trainable: {trainable:,}")
+
+    # (YOLO26-based FlashDet uses Kaiming init; pretrained backbone no longer needed)
 
     # --- torchtune: LoRA / QLoRA (apply before loading finetune/COCO weights) ---
     if args.qlora:
@@ -633,31 +717,10 @@ def main():
     elif args.finetune and args.resume:
         logger.info("--finetune ignored because --resume is set")
 
-    # Load COCO pretrained weights BEFORE DataParallel wrapping
+    # COCO pretrained loading (deprecated for YOLO26-based FlashDet)
     if args.pretrained_coco and not args.resume and not args.finetune:
-        if model_cfg["backbone"] == "0.5x":
-            logger.warning(
-                "COCO pretrained weights are NOT available for the 0.5x model. "
-                "Only 1.0x and 1.5x have official COCO checkpoints. "
-                "The 0.5x model will train from scratch (slower convergence)."
-            )
-        else:
-            logger.info("\nLoading COCO pretrained weights for fine-tuning...")
-            try:
-                result = load_coco_pretrained(
-                    model,
-                    backbone_size=model_cfg["backbone"],
-                    fpn_channels=model_cfg["fpn_channels"],
-                    input_size=args.input_size,
-                    checkpoint_path=args.pretrained_ckpt,
-                )
-                logger.info(f"  Loaded {len(result['loaded'])} weight tensors from COCO checkpoint")
-                logger.info(f"  Skipped {len(result['skipped'])} tensors (aux_head / cls layer / missing)")
-            except ValueError as e:
-                logger.warning(f"  COCO pretrained weights not available for this config: {e}")
-                logger.warning("  Training from scratch instead (no pretrained weights).")
-    elif args.pretrained_coco and args.resume:
-        logger.info("--pretrained-coco ignored because --resume is set")
+        logger.warning("--pretrained-coco is deprecated for YOLO26-based FlashDet. "
+                       "Use --finetune with a checkpoint instead. Training from scratch.")
 
     # --- torchtune: Chunked Loss ---
     if args.chunked_loss:
@@ -719,17 +782,27 @@ def main():
     if device.type == "cuda":
         log_memory_stats(device, prefix="Pre-optimizer")
 
-    # Optimizer and scheduler (with torchtune-style options)
-    base_lr = args.lr  # Honour the user-specified LR exactly
+    # Optimizer and scheduler
+    base_lr = args.lr
 
-    optimizer = create_optimizer(
-        model,
-        lr=base_lr,
-        weight_decay=config.train.weight_decay,
-        use_8bit=args.use_8bit_optimizer,
-        optimizer_in_bwd=args.optimizer_in_bwd,
-        betas=(0.9, 0.999),
-    )
+    opt_type = getattr(args, "optimizer", "musgd")
+    if opt_type == "musgd" and not args.optimizer_in_bwd:
+        logger.info(f"Optimizer: MuSGD (YOLO26 default)")
+        optimizer = build_musgd(
+            raw_model,
+            lr=base_lr,
+            momentum=0.9,
+            weight_decay=config.train.weight_decay,
+        )
+    else:
+        optimizer = create_optimizer(
+            model,
+            lr=base_lr,
+            weight_decay=config.train.weight_decay,
+            use_8bit=args.use_8bit_optimizer,
+            optimizer_in_bwd=args.optimizer_in_bwd,
+            betas=(0.9, 0.999),
+        )
     
     # LR schedule: linear warmup then cosine annealing with eta_min=0.00005
     # eta_min matches official FlashDet config (prevents LR from going too low)
@@ -807,14 +880,12 @@ def main():
             logger.info("EMA warm-started from checkpoint weights")
         logger.info(f"Resumed from epoch {start_epoch}")
     
-    # model_config dict is embedded in every checkpoint so test.py can read
-    # the correct class names and architecture without touching config.py.
     model_config = {
         "num_classes": num_classes,
         "input_size": input_size,
-        "backbone_size": model_cfg["backbone"],
-        "fpn_channels": model_cfg["fpn_channels"],
+        "model_size": model_size,
         "class_names": class_names,
+        "architecture": arch,
     }
 
     # Training loop
@@ -823,6 +894,17 @@ def main():
 
     best_map50 = 0.0   # Best model selected by mAP@0.5, not by val loss
     epochs_without_improvement = 0
+
+    # ---- History tracking for graphs & CSV ----
+    history = {
+        "epoch": [], "lr": [],
+        "train_loss": [], "val_loss": [], "mAP@0.5": [],
+        "train_box": [], "train_cls": [], "train_l1": [],
+        "val_box": [], "val_cls": [], "val_l1": [],
+        "val_epoch": [],
+    }
+    plots_dir = os.path.join(args.save_dir, "plots")
+    os.makedirs(plots_dir, exist_ok=True)
 
     for epoch in range(start_epoch, args.epochs):
         # For optimizer_in_bwd, manually compute and set the LR each epoch
@@ -863,12 +945,28 @@ def main():
             if device.type == "cuda":
                 log_memory_stats(device, prefix=f"Epoch {epoch+1}")
 
+        # Record training metrics to history
+        history["epoch"].append(epoch + 1)
+        history["lr"].append(current_lr)
+        history["train_loss"].append(train_losses.get("loss", 0))
+        history["train_box"].append(train_losses.get("o2m_box", train_losses.get("loss_box", 0)))
+        history["train_cls"].append(train_losses.get("o2m_cls", train_losses.get("loss_cls", 0)))
+        history["train_l1"].append(train_losses.get("o2m_l1", train_losses.get("loss_l1", 0)))
+
         # Validate using EMA weights (better accuracy than raw model)
         # val_interval controls how often we run the (relatively expensive) mAP pass.
         if (epoch + 1) % config.train.val_interval == 0:
-            val_loss, map50 = validate(
+            val_loss, map50, val_sub = validate(
                 raw_model, val_loader, device, logger, ema=ema, class_names=class_names
             )
+
+            # Record validation metrics to history
+            history["val_epoch"].append(epoch + 1)
+            history["val_loss"].append(val_loss)
+            history["mAP@0.5"].append(map50)
+            history["val_box"].append(val_sub.get("o2m_box", val_sub.get("loss_box", 0)))
+            history["val_cls"].append(val_sub.get("o2m_cls", val_sub.get("loss_cls", 0)))
+            history["val_l1"].append(val_sub.get("o2m_l1", val_sub.get("loss_l1", 0)))
 
             # Track best val loss for reference
             if val_loss < best_loss:
@@ -882,7 +980,8 @@ def main():
                     raw_model, optimizer, epoch, val_loss,
                     os.path.join(args.save_dir, "checkpoint_best.pth"),
                     scheduler=scheduler,
-                    config=model_config
+                    config=model_config,
+                    ema=ema,
                 )
                 save_inference_weights(
                     ema.ema,
@@ -911,6 +1010,13 @@ def main():
                     f"{epochs_without_improvement} epochs (patience={args.patience})"
                 )
                 break
+
+            # ---- Update training graphs ----
+            try:
+                _save_training_plots(history, plots_dir)
+                _save_training_csv(history, os.path.join(args.save_dir, "training_log.csv"))
+            except Exception as e:
+                logger.warning(f"Failed to save training plots: {e}")
 
         # Save latest checkpoint (EMA state included in one atomic write)
         ckpt_path = os.path.join(args.save_dir, "checkpoint_last.pth")

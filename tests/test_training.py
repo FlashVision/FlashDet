@@ -12,14 +12,15 @@ from flashdet.models.detector import FlashDet
 from flashdet.losses.kd_loss import (
     KnowledgeDistillationLoss,
 )
-from flashdet.engine.callbacks import (
+from flashdet.engine.core.callbacks import (
     Callback,
     CallbackList,
     EarlyStopping,
     LRSchedulerCallback,
     CSVLogger,
 )
-from flashdet.engine.trainer import ModelEMA, Trainer, MODEL_SIZE_MAP
+from flashdet.engine.training.trainer import Trainer, MODEL_SIZE_MAP
+from flashdet.engine.core.ema import ModelEMA
 
 
 def _make_gt_meta(batch_size=2, num_classes=5, img_size=320):
@@ -44,14 +45,8 @@ class TestKDTrainingStep:
     """End-to-end tests for KD training step (student + teacher)."""
 
     def _build_student_teacher(self, num_classes=5):
-        student = FlashDet(
-            num_classes=num_classes, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=True,
-        )
-        teacher = FlashDet(
-            num_classes=num_classes, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=False,
-        )
+        student = FlashDet(num_classes=num_classes, size="n")
+        teacher = FlashDet(num_classes=num_classes, size="s")
         teacher.eval()
         for p in teacher.parameters():
             p.requires_grad_(False)
@@ -61,7 +56,7 @@ class TestKDTrainingStep:
         student, teacher = self._build_student_teacher(5)
         kd_criterion = KnowledgeDistillationLoss(
             temperature=4.0, logit_weight=1.0, feature_weight=0.5,
-            student_channels=96, teacher_channels=96, num_levels=4,
+            student_channels=64, teacher_channels=128, num_levels=3,
         )
         student.train()
         x = torch.randn(2, 3, 320, 320)
@@ -72,11 +67,11 @@ class TestKDTrainingStep:
             t_out = teacher(x, return_features=True)
 
         kd_result = kd_criterion(
-            student_preds=s_out["preds"],
-            teacher_preds=t_out["preds"].detach(),
+            student_preds=torch.cat([s_out["o2o_cls"], s_out["o2o_reg"]], dim=-1),
+            teacher_preds=torch.cat([t_out["o2o_cls"], t_out["o2o_reg"]], dim=-1).detach(),
             student_fpn_feats=s_out["fpn_features"],
             teacher_fpn_feats=[f.detach() for f in t_out["fpn_features"]],
-            num_classes=5, reg_max=7,
+            num_classes=5, reg_max=0,
         )
 
         assert "kd_loss" in kd_result
@@ -88,7 +83,7 @@ class TestKDTrainingStep:
         student, teacher = self._build_student_teacher(5)
         kd_criterion = KnowledgeDistillationLoss(
             temperature=4.0, logit_weight=1.0, feature_weight=0.5,
-            student_channels=96, teacher_channels=96, num_levels=4,
+            student_channels=64, teacher_channels=128, num_levels=3,
         )
         student.train()
         x = torch.randn(2, 3, 320, 320)
@@ -99,11 +94,11 @@ class TestKDTrainingStep:
             t_out = teacher(x, return_features=True)
 
         kd_result = kd_criterion(
-            student_preds=s_out["preds"],
-            teacher_preds=t_out["preds"].detach(),
+            student_preds=torch.cat([s_out["o2o_cls"], s_out["o2o_reg"]], dim=-1),
+            teacher_preds=torch.cat([t_out["o2o_cls"], t_out["o2o_reg"]], dim=-1).detach(),
             student_fpn_feats=s_out["fpn_features"],
             teacher_fpn_feats=[f.detach() for f in t_out["fpn_features"]],
-            num_classes=5, reg_max=7,
+            num_classes=5, reg_max=0,
         )
 
         total_loss = s_out["loss"] + kd_result["kd_loss"]
@@ -117,7 +112,7 @@ class TestKDTrainingStep:
         student, teacher = self._build_student_teacher(5)
         kd_criterion = KnowledgeDistillationLoss(
             temperature=4.0, logit_weight=1.0, feature_weight=0.5,
-            student_channels=96, teacher_channels=96, num_levels=4,
+            student_channels=64, teacher_channels=128, num_levels=3,
         )
         student.train()
         x = torch.randn(2, 3, 320, 320)
@@ -128,11 +123,11 @@ class TestKDTrainingStep:
             t_out = teacher(x, return_features=True)
 
         kd_result = kd_criterion(
-            student_preds=s_out["preds"],
-            teacher_preds=t_out["preds"].detach(),
+            student_preds=torch.cat([s_out["o2o_cls"], s_out["o2o_reg"]], dim=-1),
+            teacher_preds=torch.cat([t_out["o2o_cls"], t_out["o2o_reg"]], dim=-1).detach(),
             student_fpn_feats=s_out["fpn_features"],
             teacher_fpn_feats=[f.detach() for f in t_out["fpn_features"]],
-            num_classes=5, reg_max=7,
+            num_classes=5, reg_max=0,
         )
 
         total_loss = s_out["loss"] + kd_result["kd_loss"]
@@ -146,7 +141,7 @@ class TestKDTrainingStep:
         student, teacher = self._build_student_teacher(5)
         kd_criterion = KnowledgeDistillationLoss(
             temperature=4.0, logit_weight=1.0, feature_weight=0.0,
-            student_channels=96, teacher_channels=96, num_levels=4,
+            student_channels=64, teacher_channels=128, num_levels=3,
         )
         student.train()
         x = torch.randn(1, 3, 320, 320)
@@ -157,11 +152,11 @@ class TestKDTrainingStep:
             t_out = teacher(x, return_features=True)
 
         kd_result = kd_criterion(
-            student_preds=s_out["preds"],
-            teacher_preds=t_out["preds"].detach(),
+            student_preds=torch.cat([s_out["o2o_cls"], s_out["o2o_reg"]], dim=-1),
+            teacher_preds=torch.cat([t_out["o2o_cls"], t_out["o2o_reg"]], dim=-1).detach(),
             student_fpn_feats=s_out["fpn_features"],
             teacher_fpn_feats=[f.detach() for f in t_out["fpn_features"]],
-            num_classes=5, reg_max=7,
+            num_classes=5, reg_max=0,
         )
 
         assert kd_result["kd_feature_loss"].item() == 0.0
@@ -172,7 +167,7 @@ class TestKDTrainingStep:
         student, teacher = self._build_student_teacher(5)
         kd_criterion = KnowledgeDistillationLoss(
             temperature=4.0, logit_weight=0.0, feature_weight=1.0,
-            student_channels=96, teacher_channels=96, num_levels=4,
+            student_channels=64, teacher_channels=128, num_levels=3,
         )
         student.train()
         x = torch.randn(1, 3, 320, 320)
@@ -183,11 +178,11 @@ class TestKDTrainingStep:
             t_out = teacher(x, return_features=True)
 
         kd_result = kd_criterion(
-            student_preds=s_out["preds"],
-            teacher_preds=t_out["preds"].detach(),
+            student_preds=torch.cat([s_out["o2o_cls"], s_out["o2o_reg"]], dim=-1),
+            teacher_preds=torch.cat([t_out["o2o_cls"], t_out["o2o_reg"]], dim=-1).detach(),
             student_fpn_feats=s_out["fpn_features"],
             teacher_fpn_feats=[f.detach() for f in t_out["fpn_features"]],
-            num_classes=5, reg_max=7,
+            num_classes=5, reg_max=0,
         )
 
         assert kd_result["kd_logit_loss"].item() == 0.0
@@ -196,21 +191,15 @@ class TestKDTrainingStep:
     def test_kd_different_channel_sizes(self):
         """Test KD when teacher has different FPN channels than student."""
         num_classes = 5
-        student = FlashDet(
-            num_classes=num_classes, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=False,
-        )
-        teacher = FlashDet(
-            num_classes=num_classes, input_size=(320, 320), backbone_size="1.0x",
-            fpn_channels=96, pretrained=False, use_aux_head=False,
-        )
+        student = FlashDet(num_classes=num_classes, size="n")
+        teacher = FlashDet(num_classes=num_classes, size="s")
         teacher.eval()
         for p in teacher.parameters():
             p.requires_grad_(False)
 
         kd_criterion = KnowledgeDistillationLoss(
             temperature=4.0, logit_weight=1.0, feature_weight=0.5,
-            student_channels=96, teacher_channels=96, num_levels=4,
+            student_channels=64, teacher_channels=128, num_levels=3,
         )
 
         student.train()
@@ -222,11 +211,11 @@ class TestKDTrainingStep:
             t_out = teacher(x, return_features=True)
 
         kd_result = kd_criterion(
-            student_preds=s_out["preds"],
-            teacher_preds=t_out["preds"].detach(),
+            student_preds=torch.cat([s_out["o2o_cls"], s_out["o2o_reg"]], dim=-1),
+            teacher_preds=torch.cat([t_out["o2o_cls"], t_out["o2o_reg"]], dim=-1).detach(),
             student_fpn_feats=s_out["fpn_features"],
             teacher_fpn_feats=[f.detach() for f in t_out["fpn_features"]],
-            num_classes=5, reg_max=7,
+            num_classes=5, reg_max=0,
         )
         assert not torch.isnan(kd_result["kd_loss"])
 
@@ -235,7 +224,7 @@ class TestKDTrainingStep:
         student, teacher = self._build_student_teacher(5)
         kd_criterion = KnowledgeDistillationLoss(
             temperature=4.0, logit_weight=1.0, feature_weight=0.5,
-            student_channels=96, teacher_channels=96, num_levels=4,
+            student_channels=64, teacher_channels=128, num_levels=3,
         )
         student.train()
         optimizer = torch.optim.Adam(
@@ -251,11 +240,11 @@ class TestKDTrainingStep:
             t_out = teacher(x, return_features=True)
 
         kd_result = kd_criterion(
-            student_preds=s_out["preds"],
-            teacher_preds=t_out["preds"].detach(),
+            student_preds=torch.cat([s_out["o2o_cls"], s_out["o2o_reg"]], dim=-1),
+            teacher_preds=torch.cat([t_out["o2o_cls"], t_out["o2o_reg"]], dim=-1).detach(),
             student_fpn_feats=s_out["fpn_features"],
             teacher_fpn_feats=[f.detach() for f in t_out["fpn_features"]],
-            num_classes=5, reg_max=7,
+            num_classes=5, reg_max=0,
         )
 
         total_loss = s_out["loss"] + kd_result["kd_loss"]
@@ -478,10 +467,7 @@ class TestTrainingLoopUnit:
         """Simulate the core _train_one_epoch logic with mock data."""
         from flashdet.utils import AverageMeter
 
-        model = FlashDet(
-            num_classes=5, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=True,
-        )
+        model = FlashDet(num_classes=5, size="n")
         model.train()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
         ema = ModelEMA(model, decay=0.9998, warmup=100)
@@ -510,10 +496,7 @@ class TestTrainingLoopUnit:
 
     def test_grad_accumulation(self):
         """Test gradient accumulation logic."""
-        model = FlashDet(
-            num_classes=5, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=False,
-        )
+        model = FlashDet(num_classes=5, size="n")
         model.train()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
         grad_accum = 2
@@ -560,10 +543,7 @@ class TestTrainingLoopUnit:
 
     def test_nan_loss_skip(self):
         """NaN losses should be skipped without crashing."""
-        model = FlashDet(
-            num_classes=5, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=False,
-        )
+        model = FlashDet(num_classes=5, size="n")
         model.train()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
@@ -592,10 +572,7 @@ class TestReturnFeatures:
     """Tests for return_features mode used in KD training."""
 
     def test_return_features_training_mode(self):
-        model = FlashDet(
-            num_classes=5, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=True,
-        )
+        model = FlashDet(num_classes=5, size="n")
         model.train()
         x = torch.randn(2, 3, 320, 320)
         gt_meta = _make_gt_meta(2, 5)
@@ -608,10 +585,7 @@ class TestReturnFeatures:
         assert "backbone_features" in out
 
     def test_return_features_eval_mode(self):
-        model = FlashDet(
-            num_classes=5, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=False,
-        )
+        model = FlashDet(num_classes=5, size="n")
         model.eval()
         x = torch.randn(1, 3, 320, 320)
         with torch.no_grad():
@@ -623,10 +597,7 @@ class TestReturnFeatures:
         assert "loss" not in out
 
     def test_fpn_features_shape(self):
-        model = FlashDet(
-            num_classes=5, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=False,
-        )
+        model = FlashDet(num_classes=5, size="n")
         model.eval()
         x = torch.randn(1, 3, 320, 320)
         with torch.no_grad():
@@ -634,20 +605,17 @@ class TestReturnFeatures:
 
         for feat in out["fpn_features"]:
             assert feat.shape[0] == 1
-            assert feat.shape[1] == 96  # fpn_channels
+            assert feat.shape[1] == 64  # FlashDet-N neck channels
 
     def test_backbone_features_shape(self):
-        model = FlashDet(
-            num_classes=5, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=False,
-        )
+        model = FlashDet(num_classes=5, size="n")
         model.eval()
         x = torch.randn(1, 3, 320, 320)
         with torch.no_grad():
             out = model(x, return_features=True)
 
-        # backbone outputs stages 2,3,4 with channels [48, 96, 192] for 0.5x
-        expected_channels = [48, 96, 192]
+        # YOLO11 backbone with width_mult=0.25 (FlashDet-N): [32, 64, 128]
+        expected_channels = [32, 64, 128]
         for feat, exp_c in zip(out["backbone_features"], expected_channels):
             assert feat.shape[1] == exp_c
 
@@ -656,52 +624,40 @@ class TestReturnFeatures:
 # AuxHead Training Tests
 # ======================================================================
 
-class TestAuxHeadTraining:
-    """Tests for auxiliary head (AGM) behavior during training."""
+class TestDualHeadTraining:
+    """Tests for YOLO26 dual-head (o2o + o2m) behavior."""
 
-    def test_aux_head_exists(self):
-        model = FlashDet(
-            num_classes=5, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=True,
-        )
-        assert hasattr(model, "aux_fpn")
-        assert hasattr(model, "aux_head")
+    def test_dual_head_exists(self):
+        model = FlashDet(num_classes=5, size="n")
+        assert hasattr(model.head, "o2o_heads")
+        assert hasattr(model.head, "o2m_heads")
 
-    def test_no_aux_head(self):
-        model = FlashDet(
-            num_classes=5, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=False,
-        )
-        assert not hasattr(model, "aux_fpn")
-        assert not hasattr(model, "aux_head")
-
-    def test_aux_not_used_in_eval(self):
-        model = FlashDet(
-            num_classes=5, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=True,
-        )
+    def test_o2m_not_used_in_eval(self):
+        """o2m (one-to-many) heads are training-only."""
+        model = FlashDet(num_classes=5, size="n")
         model.eval()
         x = torch.randn(1, 3, 320, 320)
-        gt_meta = _make_gt_meta(1, 5)
-        out = model(x, gt_meta=gt_meta, compute_loss=True)
-        # In eval mode with compute_loss, aux_head should NOT be used
-        states = out["loss_states"]
-        assert "aux_loss_qfl" not in states or states.get("aux_loss_qfl", 0) == 0
+        out = model(x)
+        assert "o2o_cls" in out
+        assert "o2o_reg" in out
 
-    def test_detach_epoch_behavior(self):
-        model = FlashDet(
-            num_classes=5, input_size=(320, 320), backbone_size="0.5x",
-            fpn_channels=96, pretrained=False, use_aux_head=True,
-        )
-        model.detach_epoch = 5
+    def test_both_heads_in_training(self):
+        model = FlashDet(num_classes=5, size="n")
+        model.train()
+        x = torch.randn(1, 3, 320, 320)
+        gt_meta = _make_gt_meta(1, 5)
+        out = model(x, gt_meta=gt_meta, epoch=0)
+        assert "loss" in out
+        states = out["loss_states"]
+        assert "o2m_loss" in states
+        assert "o2o_loss" in states
+
+    def test_prog_loss_epochs(self):
+        model = FlashDet(num_classes=5, size="n", total_epochs=10)
         model.train()
         x = torch.randn(1, 3, 320, 320)
         gt_meta = _make_gt_meta(1, 5)
 
-        # epoch < detach_epoch (no detach)
-        out1 = model(x, gt_meta=gt_meta, epoch=2)
-        assert "loss" in out1
-
-        # epoch >= detach_epoch (detach)
-        out2 = model(x, gt_meta=gt_meta, epoch=6)
-        assert "loss" in out2
+        out_early = model(x, gt_meta=gt_meta, epoch=0)
+        out_late = model(x, gt_meta=gt_meta, epoch=9)
+        assert out_early["loss_states"]["prog_alpha"] > out_late["loss_states"]["prog_alpha"]

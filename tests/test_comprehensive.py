@@ -241,7 +241,7 @@ class TestYOLOv10:
         model.train()
         x = torch.randn(1, 3, 64, 64)
         out = model(x)
-        assert "o2m_preds" in out
+        assert "preds" in out
 
 
 class TestYOLOv11:
@@ -436,15 +436,15 @@ class TestLosses:
 
 class TestRegistry:
     def test_backbone_registry(self):
-        from flashdet.registry import BACKBONES
+        from flashdet.registry import BACKBONES, DETECTORS
 
         assert "ShuffleNetV2" in BACKBONES
-        assert "DETR" in BACKBONES
-        assert "RTDETR" in BACKBONES
-        assert "YOLOv9" in BACKBONES
-        assert "YOLOv10" in BACKBONES
-        assert "YOLOv11" in BACKBONES
-        assert "GroundingDINO" in BACKBONES
+        assert "DETR" in DETECTORS
+        assert "RTDETR" in DETECTORS
+        assert "YOLOv9" in DETECTORS
+        assert "YOLOv10" in DETECTORS
+        assert "YOLOv11" in DETECTORS
+        assert "GroundingDINO" in DETECTORS
 
     def test_head_registry(self):
         from flashdet.registry import HEADS
@@ -541,27 +541,27 @@ class TestCLI:
 
 class TestEngine:
     def test_trainer_import(self):
-        from flashdet.engine.trainer import Trainer
+        from flashdet.engine.training.trainer import Trainer
 
         assert Trainer is not None
 
     def test_validator_import(self):
-        from flashdet.engine.validator import Validator
+        from flashdet.engine.evaluation.validator import Validator
 
         assert Validator is not None
 
     def test_predictor_import(self):
-        from flashdet.engine.predictor import Predictor
+        from flashdet.engine.inference.predictor import Predictor
 
         assert Predictor is not None
 
     def test_exporter_import(self):
-        from flashdet.engine.exporter import Exporter
+        from flashdet.engine.export.exporter import Exporter
 
         assert Exporter is not None
 
     def test_callbacks_import(self):
-        from flashdet.engine.callbacks import CallbackList, EarlyStopping
+        from flashdet.engine.core.callbacks import CallbackList, EarlyStopping
 
         cb_list = CallbackList()
         assert cb_list is not None
@@ -1016,7 +1016,7 @@ class TestSubmodules:
 
 
 class TestTensorRTMock:
-    @patch("flashdet.engine.exporter.torch.onnx.export")
+    @patch("flashdet.engine.export.exporter.torch.onnx.export")
     def test_onnx_export_call(self, mock_export):
         from flashdet.cfg import get_config
         from flashdet.models import build_model

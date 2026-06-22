@@ -71,10 +71,10 @@ class TestDETR:
         x = torch.randn(1, 3, 224, 224)
         results = model.predict(x, score_thr=0.0)
         assert len(results) == 1
-        assert "boxes" in results[0]
-        assert "scores" in results[0]
-        assert "labels" in results[0]
-        assert results[0]["boxes"].shape[-1] == 4
+        dets, labels = results[0]
+        assert dets.shape[-1] == 5  # x1,y1,x2,y2,score
+        assert dets.ndim == 2
+        assert labels.ndim == 1
 
     def test_predict_batch(self):
         from flashdet.models.architectures.detr import DETR
@@ -88,8 +88,8 @@ class TestDETR:
         assert len(results) == 3
 
     def test_registry(self):
-        from flashdet.registry import BACKBONES
-        assert "DETR" in BACKBONES
+        from flashdet.registry import DETECTORS
+        assert "DETR" in DETECTORS
 
     def test_model_info(self):
         from flashdet.models.architectures.detr import DETR
@@ -170,9 +170,10 @@ class TestRTDETR:
         x = torch.randn(1, 3, 224, 224)
         results = model.predict(x, score_thr=0.0)
         assert len(results) == 1
-        assert "boxes" in results[0]
-        assert "scores" in results[0]
-        assert "labels" in results[0]
+        dets, labels = results[0]
+        assert dets.shape[-1] == 5  # x1,y1,x2,y2,score
+        assert dets.ndim == 2
+        assert labels.ndim == 1
 
     def test_model_info(self):
         from flashdet.models.architectures.rt_detr import RTDETR
@@ -186,8 +187,8 @@ class TestRTDETR:
         assert info["total_params"] > 0
 
     def test_registry(self):
-        from flashdet.registry import BACKBONES
-        assert "RTDETR" in BACKBONES
+        from flashdet.registry import DETECTORS
+        assert "RTDETR" in DETECTORS
 
 
 class TestYOLOv9:
@@ -242,8 +243,8 @@ class TestYOLOv9:
         assert info["total_params"] > 0
 
     def test_registry(self):
-        from flashdet.registry import BACKBONES
-        assert "YOLOv9" in BACKBONES
+        from flashdet.registry import DETECTORS
+        assert "YOLOv9" in DETECTORS
 
 
 class TestYOLOv10:
@@ -276,10 +277,10 @@ class TestYOLOv10:
         model.train()
         x = torch.randn(1, 3, 320, 320)
         out = model(x)
-        assert "o2m_preds" in out
-        assert len(out["o2m_preds"]) == 3
+        assert "preds" in out
+        assert len(out["preds"]) == 3
 
-    def test_inference_no_o2m(self):
+    def test_inference_preds(self):
         from flashdet.models.architectures.yolov10 import YOLOv10
 
         model = YOLOv10(num_classes=5, width_mult=0.25, depth_mult=0.34, use_psa=False)
@@ -287,7 +288,8 @@ class TestYOLOv10:
         x = torch.randn(1, 3, 320, 320)
         with torch.no_grad():
             out = model(x)
-        assert "o2m_preds" not in out
+        assert "preds" in out
+        assert len(out["preds"]) == 3
 
     def test_model_info(self):
         from flashdet.models.architectures.yolov10 import YOLOv10
@@ -309,8 +311,8 @@ class TestYOLOv10:
         assert x.grad is not None
 
     def test_registry(self):
-        from flashdet.registry import BACKBONES
-        assert "YOLOv10" in BACKBONES
+        from flashdet.registry import DETECTORS
+        assert "YOLOv10" in DETECTORS
 
 
 class TestYOLOv11:
@@ -355,8 +357,8 @@ class TestYOLOv11:
         assert info["total_params"] > 0
 
     def test_registry(self):
-        from flashdet.registry import BACKBONES
-        assert "YOLOv11" in BACKBONES
+        from flashdet.registry import DETECTORS
+        assert "YOLOv11" in DETECTORS
 
 
 class TestGroundingDINO:
@@ -449,8 +451,8 @@ class TestGroundingDINO:
         assert info["total_params"] > 0
 
     def test_registry(self):
-        from flashdet.registry import BACKBONES
-        assert "GroundingDINO" in BACKBONES
+        from flashdet.registry import DETECTORS
+        assert "GroundingDINO" in DETECTORS
 
 
 # ======================================================================
@@ -506,11 +508,10 @@ class TestArchitectureTrainingInference:
         results = model.predict(images, score_thr=0.01)
         assert len(results) == 2
         for r in results:
-            assert "boxes" in r
-            assert "scores" in r
-            assert "labels" in r
-            if r["boxes"].numel() > 0:
-                assert r["boxes"].shape[-1] == 4
+            dets, labels = r
+            assert dets.shape[-1] == 5  # x1,y1,x2,y2,score
+            assert dets.ndim == 2
+            assert labels.ndim == 1
 
     # ------ RT-DETR ------
     def test_rtdetr_train_and_infer(self):
@@ -535,9 +536,10 @@ class TestArchitectureTrainingInference:
         results = model.predict(images, score_thr=0.01)
         assert len(results) == 2
         for r in results:
-            assert "boxes" in r
-            assert "scores" in r
-            assert "labels" in r
+            dets, labels = r
+            assert dets.shape[-1] == 5  # x1,y1,x2,y2,score
+            assert dets.ndim == 2
+            assert labels.ndim == 1
 
     # ------ YOLOv9 ------
     def test_yolov9_train_and_infer(self):
@@ -572,15 +574,13 @@ class TestArchitectureTrainingInference:
         model.train()
         images = torch.randn(2, 3, 320, 320)
         out = model(images)
-        assert "preds" in out        # one-to-one predictions
-        assert "o2m_preds" in out    # one-to-many (training-only)
+        assert "preds" in out
 
         # Inference (NMS-free, only one-to-one)
         model.eval()
         with torch.no_grad():
             out_eval = model(images)
         assert "preds" in out_eval
-        assert "o2m_preds" not in out_eval  # No o2m at inference
 
     # ------ YOLOv11 ------
     def test_yolov11_train_and_infer(self):
@@ -634,10 +634,10 @@ class TestArchitectureTrainingInference:
 
     # ------ Registry-based construction ------
     def test_build_from_registry(self):
-        from flashdet.registry import BACKBONES
+        from flashdet.registry import DETECTORS
 
         for name in ["DETR", "RTDETR", "YOLOv9", "YOLOv10", "YOLOv11", "GroundingDINO"]:
-            assert name in BACKBONES, f"{name} not registered"
+            assert name in DETECTORS, f"{name} not registered"
 
     # ------ Gradient flow for all architectures ------
     def test_detr_gradient_flow(self):

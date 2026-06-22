@@ -22,11 +22,9 @@ from typing import Dict, List, Optional, Tuple
 
 _IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
 
-# Kept only as a last-resort fallback when a YOLO dataset has no data.yaml
-# and no classes.txt — should never be needed in practice.
 _FALLBACK_CLASS_NAMES = [
-    "Hardhat", "Mask", "NO-Hardhat", "NO-Mask", "NO-Safety Vest",
-    "Person", "Safety Cone", "Safety Vest", "machinery", "vehicle"
+    "class_0", "class_1", "class_2", "class_3", "class_4",
+    "class_5", "class_6", "class_7", "class_8", "class_9",
 ]
 
 
@@ -417,7 +415,7 @@ def _convert_yolo_flat_to_coco(
     """YOLO without train/*/images layout: images anywhere + sibling ``labels/`` or co-located .txt."""
     random.seed(seed)
     categories = [
-        {"id": i, "name": name, "supercategory": "ppe"}
+        {"id": i, "name": name, "supercategory": "object"}
         for i, name in enumerate(class_names)
     ]
 
@@ -567,12 +565,12 @@ def convert_yolo_to_coco(
     os.makedirs(coco_dir, exist_ok=True)
     
     categories = [
-        {"id": i, "name": name, "supercategory": "ppe"}
+        {"id": i, "name": name, "supercategory": "object"}
         for i, name in enumerate(class_names)
     ]
-    
+
     stats = {}
-    
+
     for split in ["train", "valid", "test"]:
         images_dir = os.path.join(yolo_dir, split, "images")
         labels_dir = os.path.join(yolo_dir, split, "labels")

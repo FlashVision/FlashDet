@@ -1,4 +1,4 @@
-from .dataset import PPEDataset, collate_fn
+from .dataset import FlashDetDataset, PPEDataset, collate_fn
 from .dataloader import create_dataloader, create_train_val_loaders
 from .transforms import TrainTransform, ValTransform, InferenceTransform
 from .augmentations import Mosaic, MixUp, CopyPaste
@@ -10,8 +10,10 @@ from .prepare import (
     detect_dataset_format,
     summarize_coco_root,
 )
+from .download import download_dataset, list_datasets, DATASET_REGISTRY
 
 __all__ = [
+    "FlashDetDataset",
     "PPEDataset",
     "collate_fn",
     "create_dataloader",
@@ -28,4 +30,7 @@ __all__ = [
     "verify_dataset",
     "detect_dataset_format",
     "summarize_coco_root",
+    "download_dataset",
+    "list_datasets",
+    "DATASET_REGISTRY",
 ]

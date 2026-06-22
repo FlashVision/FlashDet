@@ -6,8 +6,9 @@ Matches official FlashDet implementation.
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from .conv_module import ConvModule, DepthwiseConvModule
+from flashdet.models.layers.conv_module import ConvModule, DepthwiseConvModule
 
 
 class GhostModule(nn.Module):
@@ -269,10 +270,10 @@ class GhostPAN(nn.Module):
             feat_high = inner_outs[0]
             feat_low = inputs[idx - 1]
             
-            # Upsample (matches official: nn.Upsample scale_factor=2)
-            upsample_feat = self.upsample(feat_high)
+            upsample_feat = F.interpolate(
+                feat_high, size=feat_low.shape[2:], mode="bilinear", align_corners=False
+            )
             
-            # Concat and process
             inner_out = self.top_down_blocks[len(self.in_channels) - 1 - idx](
                 torch.cat([upsample_feat, feat_low], dim=1)
             )

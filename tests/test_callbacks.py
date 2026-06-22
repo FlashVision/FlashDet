@@ -1,6 +1,6 @@
 """Unit tests for training callbacks."""
 
-from flashdet.engine.callbacks import Callback, CallbackList, EarlyStopping
+from flashdet.engine.core.callbacks import Callback, CallbackList, EarlyStopping
 
 
 class MockTrainer:

@@ -1,9 +1,9 @@
 """
 Configuration for FlashDet Model.
 
-Default class names are set for the Construction Site Safety / PPE
-dataset (10 classes).  train.py reads them automatically from the
-annotation JSON, so this is only a fallback.
+Default class names are set for the bundled indoor-objects dataset
+(10 classes).  train.py reads them automatically from the annotation
+JSON, so this is only a fallback.
 """
 
 from dataclasses import dataclass, field
@@ -14,8 +14,9 @@ from typing import List, Optional, Tuple
 class DataConfig:
     """Dataset paths — point to your COCO-format data directory.
 
-    Defaults use the included demo dataset (data/demo/) so training works
-    out of the box.  Override with your own paths for full training.
+    Defaults use the bundled indoor dataset (data/indoor/).
+    Override with your own paths or download a dataset via:
+        flashdet download --dataset coco2017
     """
     train_images: str = "data/indoor/train"
     train_annotations: str = "data/indoor/train/_annotations.coco.json"
@@ -29,13 +30,16 @@ class DataConfig:
 @dataclass
 class ModelConfig:
     """Model architecture configuration.
-    
+
+    Supported architectures: flashdet, detr, rt-detr, yolov9, yolov10, yolov11, grounding-dino.
+
     Official FlashDet model specifications:
     - FlashDet-m:      backbone=1.0x, fpn=96,  ~1.17M params, 2.3MB FP16
     - FlashDet-m-1.5x: backbone=1.5x, fpn=128, ~2.44M params, 4.7MB FP16
     - FlashDet-m-0.5x: backbone=0.5x, fpn=96,  ~0.49M params, ~0.9MB FP16 (ultra-lite)
     """
     name: str = "FlashDet"
+    architecture: str = "flashdet"
     num_classes: int = 10
     input_size: Tuple[int, int] = (320, 320)
     
@@ -69,11 +73,16 @@ class TrainConfig:
     weight_decay: float = 0.05
     warmup_epochs: int = 5
     grad_clip: float = 35.0
-    # Validate every N epochs.  5 is a good balance: frequent enough to track
-    # mAP improvements without making short runs very slow.
     val_interval: int = 5
-    save_dir: str = "workspace/default_experiment"
+    save_dir: str = "workspace/flashdet_output"
     resume: Optional[str] = None
+    patience: int = 50
+    pretrained_coco: bool = False
+
+    # --- Performance ---
+    amp: bool = False
+    multi_gpu: bool = False
+    grad_accum: int = 1
 
     # --- torchtune-inspired memory & performance optimizations ---
     enable_activation_checkpointing: bool = False
@@ -86,6 +95,7 @@ class TrainConfig:
 
     # --- LoRA (Low-Rank Adaptation) for parameter-efficient fine-tuning ---
     use_lora: bool = False
+    lora_variant: str = "standard"
     lora_rank: int = 8
     lora_alpha: float = 16.0
     lora_dropout: float = 0.05
@@ -93,7 +103,7 @@ class TrainConfig:
 
     # --- QLoRA (Quantized LoRA) ---
     use_qlora: bool = False
-    qlora_quant_dtype: str = "int8"   # "int8" or "nf4"
+    qlora_quant_dtype: str = "int8"
 
     # --- Knowledge Distillation (torchtune-style) ---
     use_kd: bool = False
@@ -103,6 +113,11 @@ class TrainConfig:
     kd_logit_weight: float = 1.0
     kd_feature_weight: float = 0.5
     kd_hard_loss_weight: float = 1.0
+
+    # --- Augmentations ---
+    mosaic: bool = False
+    mixup: bool = False
+    copy_paste: bool = False
 
 
 @dataclass
@@ -114,8 +129,8 @@ class AugmentConfig:
     brightness: float = 0.2
     contrast: Tuple[float, float] = (0.6, 1.4)
     saturation: Tuple[float, float] = (0.5, 1.2)
-    normalize_mean: List[float] = field(default_factory=lambda: [123.675, 116.28, 103.53])  # RGB
-    normalize_std: List[float] = field(default_factory=lambda: [58.395, 57.12, 57.375])     # RGB
+    normalize_mean: List[float] = field(default_factory=lambda: [123.675, 116.28, 103.53])
+    normalize_std: List[float] = field(default_factory=lambda: [58.395, 57.12, 57.375])
 
 
 @dataclass
@@ -126,22 +141,28 @@ class Config:
     train: TrainConfig = field(default_factory=TrainConfig)
     augment: AugmentConfig = field(default_factory=AugmentConfig)
 
-    # Indoor Objects Detection classes (alphabetically sorted, matching the
-    # category_id order produced by scripts/download_indoor_dataset.py).
-    # train.py overwrites this at runtime by reading the annotation JSON,
-    # so changing this list only affects the fallback / test.py default.
     class_names: List[str] = field(default_factory=lambda: ["door", "cabinetDoor", "refrigeratorDoor", "window", "chair", "table", "cabinet", "couch", "openedDoor", "pole"])
 
 
 MODEL_SIZE_MAP = {
+    # Legacy NanoDet-era sizes (backward compat)
     "m-0.5x": ("0.5x", [58, 116, 232], 96),
     "m": ("1.0x", [116, 232, 464], 96),
     "m-1.5x": ("1.5x", [176, 352, 704], 128),
 }
 
+# YOLO26-based FlashDet sizes
+YOLO26_SIZE_MAP = {
+    "n": "n",
+    "s": "s",
+    "m": "m",
+    "l": "l",
+    "x": "x",
+}
+
 
 def get_config(
-    model_size: str = "m",
+    model_size: str = "n",
     input_size: int = 320,
     num_classes: int = 10,
     **overrides,
@@ -149,14 +170,18 @@ def get_config(
     """Return configuration for a given model size.
 
     Args:
-        model_size: One of "m-0.5x", "m", "m-1.5x".
+        model_size: YOLO26-based: "n", "s", "m", "l", "x".
+            Legacy NanoDet: "m-0.5x", "m-1.5x" (backward compat).
         input_size: Input image dimension (square).
         num_classes: Number of detection classes.
         **overrides: Additional overrides applied to the Config.
     """
     cfg = Config()
 
-    if model_size in MODEL_SIZE_MAP:
+    # YOLO26-based FlashDet size
+    if model_size in YOLO26_SIZE_MAP:
+        cfg.model.size = YOLO26_SIZE_MAP[model_size]
+    elif model_size in MODEL_SIZE_MAP:
         backbone_size, fpn_in, fpn_out = MODEL_SIZE_MAP[model_size]
         cfg.model.backbone_size = backbone_size
         cfg.model.fpn_in_channels = fpn_in
