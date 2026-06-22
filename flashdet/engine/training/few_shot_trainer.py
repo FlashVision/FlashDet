@@ -116,6 +116,104 @@ class FewShotTrainer(Trainer):
         self.novel_class_file = novel_class_file
         self.support_images = support_images
 
+    def train(self):
+        """Override to load base checkpoint and freeze layers before training."""
+        cfg = self._config
+        if self.train_images:
+            cfg.data.train_images = self.train_images
+            cfg.data.train_annotations = os.path.join(self.train_images, "_annotations.coco.json")
+        if self.val_images:
+            cfg.data.val_images = self.val_images
+            cfg.data.val_annotations = os.path.join(self.val_images, "_annotations.coco.json")
+
+        class_names = self._resolve_class_names(cfg)
+        num_classes = len(class_names)
+
+        self._logger.info("=" * 60)
+        self._logger.info(f"Few-Shot Training ({self.n_shot}-shot)")
+        self._logger.info("=" * 60)
+
+        from flashdet.data import create_dataloader, verify_dataset
+        data_root = os.path.dirname(os.path.normpath(cfg.data.train_images))
+        if not verify_dataset(data_root):
+            raise FileNotFoundError(f"Dataset not found at {data_root}")
+
+        train_loader = create_dataloader(
+            img_dir=cfg.data.train_images, ann_file=cfg.data.train_annotations,
+            batch_size=self.batch_size, input_size=self.input_size,
+            num_workers=self.workers, is_train=True,
+        )
+        val_loader = create_dataloader(
+            img_dir=cfg.data.val_images, ann_file=cfg.data.val_annotations,
+            batch_size=self.batch_size, input_size=self.input_size,
+            num_workers=self.workers, is_train=False,
+        )
+
+        arch = self.architecture.lower()
+        if arch in ("flashdet", ""):
+            size_key = {"m": "n", "m-0.5x": "n", "m-1.5x": "s"}.get(self.model_size, "n")
+            model = FlashDet(
+                num_classes=num_classes, size=size_key, total_epochs=self.epochs,
+            ).to(self.device)
+        else:
+            cfg.model.num_classes = num_classes
+            model = build_model(cfg, architecture=arch).to(self.device)
+
+        self._load_base_model(model)
+        self._log_trainable_summary(model)
+
+        param_groups = self._build_param_groups(model)
+        from flashdet.utils.torchtune_optim import create_optimizer
+        if param_groups:
+            optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.train.weight_decay)
+        else:
+            optimizer = create_optimizer(model, lr=self.lr, weight_decay=cfg.train.weight_decay)
+
+        from flashdet.engine.core.ema import ModelEMA
+        ema = ModelEMA(model, decay=0.9998, warmup=2000)
+
+        import math
+        eta_min = 0.00005
+        eta_min_factor = eta_min / self.lr
+        def lr_lambda(epoch):
+            if epoch < self.warmup_epochs:
+                return (epoch + 1) / self.warmup_epochs
+            progress = (epoch - self.warmup_epochs) / max(self.epochs - self.warmup_epochs, 1)
+            return eta_min_factor + (1.0 - eta_min_factor) * 0.5 * (1.0 + math.cos(math.pi * progress))
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+        from flashdet.utils import save_checkpoint, save_inference_weights
+        from flashdet.utils.metrics import compute_map
+
+        best_map50 = 0.0
+        best_loss = float("inf")
+        model_config = {"num_classes": num_classes, "class_names": class_names, "architecture": self.architecture}
+
+        self._logger.info(f"\nStarting {self.n_shot}-shot fine-tuning for {self.epochs} epochs...")
+        for epoch in range(self.epochs):
+            current_lr = optimizer.param_groups[0]["lr"]
+            self._logger.info(f"\nEpoch {epoch+1}/{self.epochs} (lr={current_lr:.6f})")
+
+            train_losses = self._train_one_epoch(model, train_loader, optimizer, epoch + 1, ema, None)
+
+            if (epoch + 1) % cfg.train.val_interval == 0:
+                val_loss, map50 = self._validate(model, val_loader, ema, class_names)
+                if map50 > best_map50:
+                    best_map50 = map50
+                    save_checkpoint(model, optimizer, epoch, val_loss,
+                                    os.path.join(self.save_dir, "checkpoint_best.pth"),
+                                    scheduler=scheduler, config=model_config, ema=ema)
+                    save_inference_weights(ema.ema, os.path.join(self.save_dir, "model_best_inference.pth"),
+                                           config=model_config, half=False)
+                    self._logger.info(f"  Best model (mAP@0.5: {best_map50:.4f})")
+                if val_loss < best_loss:
+                    best_loss = val_loss
+
+            scheduler.step()
+
+        self._logger.info(f"\nFew-shot training complete. Best mAP@0.5: {best_map50:.4f}")
+        return {"best_map50": best_map50, "best_loss": best_loss}
+
     def _load_base_model(self, model: nn.Module) -> None:
         """Load base model weights and optionally freeze layers."""
         ckpt = torch.load(self.base_checkpoint, map_location=self.device, weights_only=False)

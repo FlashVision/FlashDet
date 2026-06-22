@@ -245,7 +245,17 @@ class SSLTrainer:
 
         projector = ProjectionHead(feat_dim, out_dim=self.proj_dim).to(self.device)
 
-        online_net = nn.Sequential(backbone, nn.AdaptiveAvgPool2d(1), nn.Flatten(), projector)
+        class _BackboneWrapper(nn.Module):
+            """Wraps a backbone that returns a list of feature maps,
+            extracting only the last stage for contrastive learning."""
+            def __init__(self, bb):
+                super().__init__()
+                self.bb = bb
+            def forward(self, x):
+                out = self.bb(x)
+                return out[-1] if isinstance(out, (list, tuple)) else out
+
+        online_net = nn.Sequential(_BackboneWrapper(backbone), nn.AdaptiveAvgPool2d(1), nn.Flatten(), projector)
 
         if self.ssl_method == "byol":
             predictor = PredictionHead(self.proj_dim, out_dim=self.proj_dim).to(self.device)

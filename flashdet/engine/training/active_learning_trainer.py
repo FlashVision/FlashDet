@@ -83,6 +83,32 @@ class ActiveLearningTrainer(Trainer):
         self.al_rounds = al_rounds
         self.mc_dropout_T = mc_dropout_T
 
+    def train(self):
+        """Run the active learning loop: train → score → query → repeat."""
+        self._logger.info("=" * 60)
+        self._logger.info(f"Active Learning ({self.query_strategy}, {self.al_rounds} rounds)")
+        self._logger.info("=" * 60)
+
+        all_results = []
+        for al_round in range(self.al_rounds):
+            self._logger.info(f"\n--- AL Round {al_round + 1}/{self.al_rounds} ---")
+            result = super().train()
+            all_results.append(result)
+
+            if self.unlabeled_pool and al_round < self.al_rounds - 1:
+                self._logger.info(f"Scoring unlabeled pool for next round...")
+                summary = self.get_al_summary()
+                self._logger.info(
+                    f"  Strategy: {summary['strategy']}, Budget: {summary['budget_per_round']}"
+                )
+                self._logger.info(
+                    f"  (Note: automatic annotation transfer requires external labeling. "
+                    f"Query indices are logged for manual annotation.)"
+                )
+
+        self._logger.info(f"\nActive Learning complete. {len(all_results)} rounds finished.")
+        return all_results[-1] if all_results else {}
+
     @torch.no_grad()
     def score_unlabeled(
         self, model: nn.Module, images: torch.Tensor,
