@@ -11,7 +11,6 @@ trainer = Trainer(
     val_images="data/val",
     epochs=100,
     device="cuda",
-    pretrained_coco=True,
 )
 trainer.train()
 ```

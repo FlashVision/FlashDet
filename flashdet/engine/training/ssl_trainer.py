@@ -10,14 +10,14 @@ Usage::
 
     trainer = SSLTrainer(
         ssl_method="byol",        # "byol" | "moco" | "simclr"
-        train_images="data/unlabeled/images",
+        train_images="path/to/unlabeled/images",
         epochs=100,
     )
-    trainer.pretrain()
+    backbone_path = ssl.pretrain()
 
     # Then fine-tune:
     from flashdet.engine import Trainer
-    trainer = Trainer(finetune="workspace/ssl_output/backbone_pretrained.pth", ...)
+    trainer = Trainer(finetune=backbone_path, ...)
     trainer.train()
 """
 

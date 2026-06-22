@@ -56,7 +56,7 @@ class SimpleConvHead(nn.Module):
     
     def __init__(
         self,
-        num_classes: int = 10,
+        num_classes: int = 80,
         input_channel: int = 192,
         feat_channels: int = 192,
         stacked_convs: int = 4,

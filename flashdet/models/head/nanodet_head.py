@@ -94,7 +94,7 @@ class FlashDetHead(nn.Module):
     
     def __init__(
         self,
-        num_classes: int = 10,
+        num_classes: int = 80,
         input_channel: int = 96,
         feat_channels: int = 96,
         stacked_convs: int = 2,

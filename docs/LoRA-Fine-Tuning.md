@@ -28,11 +28,3 @@ Quantized LoRA reduces memory further by quantizing frozen weights:
 ```bash
 python train.py --qlora --qlora-dtype nf4 --lora-rank 8
 ```
-
-## Knowledge Distillation
-
-Train a small student from a larger teacher:
-
-```bash
-python train_kd.py --teacher-checkpoint teacher.pth --teacher-size m-1.5x --model-size m-0.5x
-```

@@ -3,7 +3,7 @@ Evaluation metrics for object detection.
 """
 
 import numpy as np
-from typing import List, Dict
+from typing import Dict, List, Optional
 
 
 def compute_iou(box1: np.ndarray, box2: np.ndarray) -> float:
@@ -72,7 +72,7 @@ def compute_map(
     predictions: List[Dict],
     ground_truths: List[Dict],
     iou_threshold: float = 0.5,
-    num_classes: int = 10
+    num_classes: Optional[int] = None,
 ) -> Dict[str, float]:
     """
     Compute mean Average Precision.
@@ -81,11 +81,25 @@ def compute_map(
         predictions: List of prediction dicts with 'boxes', 'scores', 'labels'
         ground_truths: List of ground truth dicts with 'boxes', 'labels'
         iou_threshold: IoU threshold for matching
-        num_classes: Number of classes
+        num_classes: Number of classes. If None, inferred from data.
         
     Returns:
         Dictionary with AP per class and mAP
     """
+    if num_classes is None:
+        all_labels = set()
+        for gt in ground_truths:
+            labels = gt.get("labels", [])
+            if hasattr(labels, "tolist"):
+                labels = labels.tolist()
+            all_labels.update(labels)
+        for pred in predictions:
+            labels = pred.get("labels", [])
+            if hasattr(labels, "tolist"):
+                labels = labels.tolist()
+            all_labels.update(labels)
+        num_classes = max(all_labels) + 1 if all_labels else 1
+
     aps = {}
     
     for class_id in range(num_classes):

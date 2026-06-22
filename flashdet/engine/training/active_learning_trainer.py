@@ -9,8 +9,8 @@ Usage::
     from flashdet.engine import ActiveLearningTrainer
 
     trainer = ActiveLearningTrainer(
-        labeled_images="data/labeled/train",
-        unlabeled_pool="data/unlabeled/images",
+        labeled_images="path/to/labeled/train",
+        unlabeled_pool="path/to/unlabeled/pool",
         query_strategy="entropy",
         query_budget=50,
         al_rounds=5,

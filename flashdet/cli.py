@@ -101,7 +101,7 @@ def cmd_check(args):
         import torch
         from flashdet.cfg import get_config
         from flashdet.models import build_model
-        cfg = get_config(model_size="m", input_size=320, num_classes=10)
+        cfg = get_config(model_size="m", input_size=320, num_classes=80)
         model = build_model(cfg)
         model.eval()
         with torch.no_grad():

@@ -13,8 +13,8 @@ Usage::
     from flashdet.engine import SemiSupervisedTrainer
 
     trainer = SemiSupervisedTrainer(
-        labeled_images="data/labeled/train",
-        unlabeled_images="data/unlabeled/images",
+        labeled_images="path/to/labeled/train",
+        unlabeled_images="path/to/unlabeled/images",
         pseudo_label_threshold=0.7,
         unsup_loss_weight=1.0,
         teacher_momentum=0.999,

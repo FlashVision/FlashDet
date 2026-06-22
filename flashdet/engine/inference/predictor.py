@@ -78,7 +78,7 @@ class Predictor:
             self.input_size = (input_size, input_size)
 
             self.model = FlashDet(
-                num_classes=80,
+                num_classes=len(COCO_NAMES),
                 input_size=self.input_size,
                 backbone_size=mcfg["backbone"],
                 fpn_channels=mcfg["fpn_channels"],
