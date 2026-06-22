@@ -459,8 +459,10 @@ def main():
     parser.add_argument("--warmup-epochs", type=int, default=5, help="Warmup epochs")
     parser.add_argument("--patience", type=int, default=50,
                         help="Early stopping patience (epochs without mAP improvement). 0 disables.")
-    parser.add_argument("--model-size", default="n", choices=["n", "s", "m", "l", "x"],
-                        help="Model size: n (~1.5M), s (~5.4M), m (~18M), l, x")
+    parser.add_argument("--val-interval", type=int, default=None,
+                        help="Run validation/mAP every N epochs (default: config value, usually 5). Set to 1 for every epoch.")
+    parser.add_argument("--model-size", default="n", choices=["p", "n", "s", "m", "l", "x"],
+                        help="Model size: p (~298K pico), n (~1.5M), s (~5.4M), m (~18M), l, x")
     parser.add_argument("--architecture", default="flashdet",
                         choices=["flashdet", "detr", "rt-detr", "yolov9", "yolov10", "yolov11", "grounding-dino"],
                         help="Detection architecture (default: flashdet)")
@@ -568,6 +570,9 @@ def main():
     if args.val_images:
         config.data.val_images = args.val_images
         config.data.val_annotations = os.path.join(args.val_images, "_annotations.coco.json")
+
+    if args.val_interval is not None:
+        config.train.val_interval = args.val_interval
 
     # Resolve class names: explicit file > annotation JSON > config fallback
     class_names = None

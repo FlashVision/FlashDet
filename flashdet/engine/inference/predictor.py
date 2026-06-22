@@ -47,7 +47,7 @@ class Predictor:
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.conf_thresh = conf_thresh
-        self.nms_thresh = nms_thresh
+        self.nms_thresh = nms_thresh  # kept for non-FlashDet architectures
 
         MODEL_SIZE_MAP = {
             "m": {"backbone": "1.0x", "fpn_channels": 96},
@@ -164,7 +164,10 @@ class Predictor:
 
     @torch.no_grad()
     def detect(self, image: np.ndarray) -> List[Tuple[str, float, int, int, int, int]]:
-        """Run detection on a BGR image.
+        """Run NMS-free detection on a BGR image.
+
+        FlashDet uses the YOLO26 one-to-one head which is inherently
+        NMS-free — only score thresholding + top-k is applied.
 
         Returns:
             List of (class_name, score, x1, y1, x2, y2) tuples.
@@ -174,7 +177,7 @@ class Predictor:
         tensor, meta = self.transform(rgb)
         tensor = torch.from_numpy(tensor).unsqueeze(0).to(self.device)
 
-        results = self.model.predict(tensor, None, self.conf_thresh, self.nms_thresh)
+        results = self.model.predict(tensor, None, self.conf_thresh)
 
         warp_matrix = meta["warp_matrix"]
         inv_warp = np.linalg.inv(warp_matrix)
