@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from flashdet.cfg import get_config
 from flashdet.models import FlashDet, load_coco_pretrained
+from flashdet.models.detector import build_model, ARCHITECTURE_REGISTRY
 from flashdet.models.lora import (
     apply_lora, apply_qlora, merge_lora_weights, get_lora_state_dict,
 )
@@ -27,51 +28,10 @@ from flashdet.utils.torchtune_optim import (
     create_optimizer,
     compile_model as torchtune_compile,
 )
-from flashdet.engine.callbacks import CallbackList, Callback
+from flashdet.engine.core.callbacks import CallbackList, Callback
+from flashdet.engine.core.ema import ModelEMA
 
 logger = logging.getLogger(__name__)
-
-
-class ModelEMA:
-    """Exponential Moving Average of model weights with adaptive decay warmup."""
-
-    def __init__(self, model: nn.Module, decay: float = 0.9998, warmup: int = 2000):
-        self.ema = copy.deepcopy(model)
-        self.ema.eval()
-        self.target_decay = decay
-        self.warmup = warmup
-        self.num_updates = 0
-        for p in self.ema.parameters():
-            p.requires_grad_(False)
-
-    @property
-    def decay(self):
-        return min(self.target_decay,
-                   (1 + self.num_updates) / (self.warmup + self.num_updates))
-
-    @torch.no_grad()
-    def update(self, model: nn.Module):
-        self.num_updates += 1
-        d = self.decay
-        for ema_p, model_p in zip(self.ema.parameters(), model.parameters()):
-            ema_p.data.mul_(d).add_(model_p.data, alpha=1.0 - d)
-        for ema_b, model_b in zip(self.ema.buffers(), model.buffers()):
-            ema_b.copy_(model_b)
-
-    def state_dict(self):
-        return {
-            "ema_state": self.ema.state_dict(),
-            "target_decay": self.target_decay,
-            "warmup": self.warmup,
-            "num_updates": self.num_updates,
-        }
-
-    def load_state_dict(self, state: dict):
-        self.ema.load_state_dict(state["ema_state"], strict=False)
-        self.target_decay = state.get("target_decay",
-                                      state.get("decay", self.target_decay))
-        self.warmup = state.get("warmup", self.warmup)
-        self.num_updates = state.get("num_updates", 0)
 
 
 MODEL_SIZE_MAP = {
@@ -106,7 +66,7 @@ class Trainer:
         batch_size: int = 32,
         lr: float = 0.001,
         workers: int = 4,
-        save_dir: str = "workspace/ppe_detector",
+        save_dir: str = "workspace/flashdet_output",
         resume: Optional[str] = None,
         device: str = "cuda",
         warmup_epochs: int = 5,
@@ -114,6 +74,7 @@ class Trainer:
         # Model
         model_size: str = "m",
         input_size: int = 320,
+        architecture: str = "flashdet",
         finetune: Optional[str] = None,
         pretrained_coco: bool = False,
         pretrained_ckpt: Optional[str] = None,
@@ -142,6 +103,10 @@ class Trainer:
         lora_targets: Optional[List[str]] = None,
         qlora: bool = False,
         qlora_dtype: str = "int8",
+        # Augmentations
+        mosaic: bool = False,
+        mixup: bool = False,
+        copy_paste: bool = False,
         # Config override
         config: Any = None,
     ):
@@ -179,8 +144,18 @@ class Trainer:
         self.lora_targets = lora_targets or ["backbone", "fpn"]
         self.qlora = qlora
         self.qlora_dtype = qlora_dtype
+        self.architecture = architecture
+        self.mosaic = mosaic
+        self.mixup = mixup
+        self.copy_paste = copy_paste
 
         self._config = config or get_config()
+
+        # When initialised from a YAML config, apply config values as defaults
+        # for any parameter the caller did not explicitly set.
+        if config is not None:
+            self._apply_config_defaults(config)
+
         self._model_cfg = MODEL_SIZE_MAP[self.model_size]
 
         # Resolve device
@@ -194,6 +169,66 @@ class Trainer:
         os.makedirs(self.save_dir, exist_ok=True)
         self._logger = setup_logger("FlashDet", self.save_dir)
         self.callbacks = CallbackList()
+
+    def _apply_config_defaults(self, cfg) -> None:
+        """Map YAML Config fields onto Trainer attributes so config-driven
+        training works without the caller having to repeat every field."""
+        tc = cfg.train
+        self.epochs = tc.epochs
+        self.batch_size = tc.batch_size
+        self.lr = tc.learning_rate
+        self.save_dir = tc.save_dir
+        self.warmup_epochs = tc.warmup_epochs
+        self.patience = getattr(tc, "patience", self.patience)
+        self.pretrained_coco = getattr(tc, "pretrained_coco", self.pretrained_coco)
+        self.amp = getattr(tc, "amp", self.amp)
+        self.multi_gpu = getattr(tc, "multi_gpu", self.multi_gpu)
+        self.grad_accum = max(1, getattr(tc, "grad_accum", self.grad_accum))
+
+        if tc.resume:
+            self.resume = tc.resume
+
+        # LoRA
+        self.lora = getattr(tc, "use_lora", self.lora)
+        self.lora_variant = getattr(tc, "lora_variant", self.lora_variant)
+        self.lora_rank = getattr(tc, "lora_rank", self.lora_rank)
+        self.lora_alpha = getattr(tc, "lora_alpha", self.lora_alpha)
+        self.lora_dropout = getattr(tc, "lora_dropout", self.lora_dropout)
+        self.lora_targets = getattr(tc, "lora_target_modules", self.lora_targets)
+
+        # QLoRA
+        self.qlora = getattr(tc, "use_qlora", self.qlora)
+        self.qlora_dtype = getattr(tc, "qlora_quant_dtype", self.qlora_dtype)
+
+        # torchtune optimizations
+        self.activation_checkpointing = getattr(tc, "enable_activation_checkpointing", self.activation_checkpointing)
+        self.activation_offloading = getattr(tc, "enable_activation_offloading", self.activation_offloading)
+        self.optimizer_in_bwd = getattr(tc, "optimizer_in_bwd", self.optimizer_in_bwd)
+        self.use_8bit_optimizer = getattr(tc, "use_8bit_optimizer", self.use_8bit_optimizer)
+        self.compile = getattr(tc, "compile_model", self.compile)
+        self.chunked_loss = getattr(tc, "chunked_cross_entropy", self.chunked_loss)
+        self.chunk_size = getattr(tc, "ce_chunk_size", self.chunk_size)
+
+        # Model config
+        mc = cfg.model
+        self.architecture = getattr(mc, "architecture", self.architecture)
+        if mc.backbone_size in ("0.5x", "1.0x", "1.5x"):
+            size_map = {"0.5x": "m-0.5x", "1.0x": "m", "1.5x": "m-1.5x"}
+            self.model_size = size_map[mc.backbone_size]
+        self.input_size = mc.input_size if isinstance(mc.input_size, tuple) else (mc.input_size, mc.input_size)
+
+        # Augmentations
+        self.mosaic = getattr(tc, "mosaic", self.mosaic)
+        self.mixup = getattr(tc, "mixup", self.mixup)
+        self.copy_paste = getattr(tc, "copy_paste", self.copy_paste)
+
+        # Data
+        dc = cfg.data
+        if dc.train_images:
+            self.train_images = dc.train_images
+        if dc.val_images:
+            self.val_images = dc.val_images
+        self.workers = dc.num_workers
 
     # ------------------------------------------------------------------
     # Callback API
@@ -243,6 +278,9 @@ class Trainer:
             input_size=self.input_size,
             num_workers=self.workers,
             is_train=True,
+            mosaic=self.mosaic,
+            mixup=self.mixup,
+            copy_paste=self.copy_paste,
         )
         val_loader = create_dataloader(
             img_dir=cfg.data.val_images,
@@ -254,14 +292,20 @@ class Trainer:
         )
 
         # Build model
-        model = FlashDet(
-            num_classes=num_classes,
-            input_size=self.input_size,
-            backbone_size=self._model_cfg["backbone"],
-            fpn_channels=self._model_cfg["fpn_channels"],
-            pretrained=cfg.model.backbone_pretrained,
-            use_aux_head=True,
-        ).to(self.device)
+        arch = self.architecture.lower()
+        if arch in ("flashdet", ""):
+            model = FlashDet(
+                num_classes=num_classes,
+                input_size=self.input_size,
+                backbone_size=self._model_cfg["backbone"],
+                fpn_channels=self._model_cfg["fpn_channels"],
+                pretrained=cfg.model.backbone_pretrained,
+                use_aux_head=True,
+            ).to(self.device)
+        else:
+            cfg.model.num_classes = num_classes
+            model = build_model(cfg, architecture=arch).to(self.device)
+            self._logger.info(f"Architecture: {arch}")
 
         # Apply LoRA / QLoRA
         model = self._apply_lora(model)
@@ -348,6 +392,7 @@ class Trainer:
             "backbone_size": self._model_cfg["backbone"],
             "fpn_channels": self._model_cfg["fpn_channels"],
             "class_names": class_names,
+            "architecture": self.architecture,
         }
 
         # Training loop
@@ -393,6 +438,7 @@ class Trainer:
                         raw_model, optimizer, epoch, val_loss,
                         best_path,
                         scheduler=scheduler, config=model_config,
+                        ema=ema,
                     )
                     save_inference_weights(
                         ema.ema,
@@ -538,6 +584,7 @@ class Trainer:
         model.train()
         use_amp = scaler is not None
         loss_meter = AverageMeter("Loss")
+        sub_meters = {}
         raw_model = model.module if hasattr(model, "module") else model
 
         for batch_idx, (images, gt_meta) in enumerate(dataloader):
@@ -571,14 +618,26 @@ class Trainer:
                     ema.update(raw_model)
 
             loss_meter.update(output["loss"].item())
+            loss_states = output.get("loss_states", {})
+            for key, val in loss_states.items():
+                if key.endswith("num_pos"):
+                    continue
+                if key not in sub_meters:
+                    sub_meters[key] = AverageMeter(key)
+                sub_meters[key].update(val.item())
             self.callbacks.fire("on_batch_end", self, batch_idx, output["loss"].item())
 
             if (batch_idx + 1) % 10 == 0:
+                sub_str = ", ".join(f"{k}: {m.avg:.4f}" for k, m in sub_meters.items())
                 self._logger.info(
                     f"  [{batch_idx+1}/{len(dataloader)}] Loss: {loss_meter.avg:.4f}"
+                    + (f" ({sub_str})" if sub_str else "")
                 )
 
-        return {"loss": loss_meter.avg}
+        result = {"loss": loss_meter.avg}
+        for key, meter in sub_meters.items():
+            result[key] = meter.avg
+        return result
 
     @torch.no_grad()
     def _validate(self, model, dataloader, ema, class_names):
@@ -586,12 +645,23 @@ class Trainer:
         eval_model.eval()
 
         loss_meter = AverageMeter("Loss")
+        sub_meters = {}
         all_preds, all_gts = [], []
 
         for images, gt_meta in dataloader:
             images = images.to(self.device)
+
             out = eval_model(images, gt_meta, epoch=0, compute_loss=True)
-            loss_meter.update(out["loss"].item())
+
+            if "loss" in out:
+                loss_meter.update(out["loss"].item())
+            loss_states = out.get("loss_states", {})
+            for key, val in loss_states.items():
+                if key.endswith("num_pos"):
+                    continue
+                if key not in sub_meters:
+                    sub_meters[key] = AverageMeter(key)
+                sub_meters[key].update(val.item())
 
             results = eval_model.predict(images, None, score_thr=0.05, nms_thr=0.6)
             for i, (dets, lbs) in enumerate(results):
@@ -614,8 +684,11 @@ class Trainer:
         map_results = compute_map(all_preds, all_gts, iou_threshold=0.5, num_classes=num_cls)
         map50 = map_results["mAP"]
 
+        sub_str = ", ".join(f"{k}: {m.avg:.4f}" for k, m in sub_meters.items())
         self._logger.info(
-            f"  Val Loss: {loss_meter.avg:.4f} | mAP@0.5: {map50:.4f}"
+            f"  Val Loss: {loss_meter.avg:.4f}"
+            + (f" ({sub_str})" if sub_str else "")
+            + f" | mAP@0.5: {map50:.4f}"
         )
 
         model.train()

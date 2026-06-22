@@ -1,4 +1,4 @@
-"""FlashDet CLI — command-line interface for training, validation, prediction, and export."""
+"""FlashDet CLI — command-line interface for training, validation, prediction, export, and dataset download."""
 
 import argparse
 import sys
@@ -62,7 +62,6 @@ def cmd_check(args):
     print(_colored("Checking installation...", "bold"))
     print()
 
-    # Core imports
     try:
         import flashdet  # noqa: F401
         print(f"  {_colored('✓', 'green')} flashdet package")
@@ -70,7 +69,6 @@ def cmd_check(args):
         print(f"  {_colored('✗', 'red')} flashdet package: {e}")
         errors.append(str(e))
 
-    # Engine
     try:
         from flashdet.engine import Trainer, Predictor, Exporter, Validator  # noqa: F401
         print(f"  {_colored('✓', 'green')} engine (Trainer, Predictor, Exporter, Validator)")
@@ -78,7 +76,6 @@ def cmd_check(args):
         print(f"  {_colored('✗', 'red')} engine: {e}")
         errors.append(str(e))
 
-    # Trackers
     try:
         from flashdet.trackers import ByteTracker, SORTTracker, BoTSORT  # noqa: F401
         print(f"  {_colored('✓', 'green')} trackers (ByteTracker, SORT, BoTSORT)")
@@ -86,7 +83,6 @@ def cmd_check(args):
         print(f"  {_colored('✗', 'red')} trackers: {e}")
         errors.append(str(e))
 
-    # Solutions
     try:
         from flashdet.solutions import ObjectCounter, SpeedEstimator, Heatmap  # noqa: F401
         print(f"  {_colored('✓', 'green')} solutions (ObjectCounter, SpeedEstimator, Heatmap, ...)")
@@ -94,7 +90,6 @@ def cmd_check(args):
         print(f"  {_colored('✗', 'red')} solutions: {e}")
         errors.append(str(e))
 
-    # Analytics
     try:
         from flashdet.analytics import Benchmark, Profiler  # noqa: F401
         print(f"  {_colored('✓', 'green')} analytics (Benchmark, Profiler)")
@@ -102,7 +97,6 @@ def cmd_check(args):
         print(f"  {_colored('✗', 'red')} analytics: {e}")
         errors.append(str(e))
 
-    # Model forward pass
     try:
         import torch
         from flashdet.cfg import get_config
@@ -117,7 +111,6 @@ def cmd_check(args):
         print(f"  {_colored('✗', 'red')} model forward pass: {e}")
         errors.append(str(e))
 
-    # GPU
     import torch
     if torch.cuda.is_available():
         print(f"  {_colored('✓', 'green')} CUDA ({torch.cuda.get_device_name(0)})")
@@ -132,9 +125,36 @@ def cmd_check(args):
         print(_colored("✓ All checks passed! FlashDet is ready.", "green"))
 
 
+def cmd_download(args):
+    """Download an open-source dataset."""
+    from flashdet.data.download import download_dataset, list_datasets
+
+    if args.list:
+        _print_banner()
+        datasets = list_datasets()
+        print(_colored("Available datasets:", "bold"))
+        print()
+        for ds in datasets:
+            print(f"  {_colored(ds['id'], 'green'):30s} {ds['name']}")
+            print(f"  {'':30s} {ds['description']}")
+            print(f"  {'':30s} Classes: {ds['classes']}, Format: {ds['format']}")
+            print()
+        return
+
+    if not args.dataset:
+        print(_colored("Error:", "red") + " --dataset is required (or use --list to see options)")
+        sys.exit(1)
+
+    download_dataset(
+        dataset_id=args.dataset,
+        output_dir=args.output,
+        cache_dir=args.cache_dir,
+    )
+
+
 def cmd_train(args):
     """Train a FlashDet model."""
-    from flashdet.engine.trainer import Trainer
+    from flashdet.engine.training.trainer import Trainer
 
     if args.config:
         from flashdet.cfg import load_yaml_config
@@ -147,6 +167,7 @@ def cmd_train(args):
             sys.exit(1)
         kwargs = {
             "model_size": args.model_size,
+            "architecture": args.architecture,
             "epochs": args.epochs,
             "batch_size": args.batch_size,
             "device": args.device,
@@ -165,6 +186,10 @@ def cmd_train(args):
             kwargs["lr"] = args.lr
         if args.workers is not None:
             kwargs["workers"] = args.workers
+        if args.mosaic:
+            kwargs["mosaic"] = True
+        if args.mixup:
+            kwargs["mixup"] = True
         trainer = Trainer(**kwargs)
 
     trainer.train()
@@ -172,7 +197,7 @@ def cmd_train(args):
 
 def cmd_predict(args):
     """Run inference on an image, video, or directory."""
-    from flashdet.engine.predictor import Predictor
+    from flashdet.engine.inference.predictor import Predictor
 
     predictor = Predictor(
         model_path=args.model,
@@ -191,7 +216,7 @@ def cmd_predict(args):
 
 def cmd_val(args):
     """Validate model on a dataset."""
-    from flashdet.engine.validator import Validator
+    from flashdet.engine.evaluation.validator import Validator
     validator = Validator(
         model_path=args.model,
         val_images=args.val_images,
@@ -202,10 +227,16 @@ def cmd_val(args):
 
 def cmd_export(args):
     """Export model to ONNX."""
-    from flashdet.engine.exporter import Exporter
+    from flashdet.engine.export.exporter import Exporter
     exporter = Exporter(model_path=args.model)
     path = exporter.export(output=args.output, simplify=args.simplify)
     print(f"\n{_colored('✓', 'green')} Exported: {path}")
+
+
+def cmd_datasets(args):
+    """List available datasets and show dataset info."""
+    cmd_download_args = argparse.Namespace(list=True, dataset=None, output=None, cache_dir=None)
+    cmd_download(cmd_download_args)
 
 
 def main():
@@ -216,7 +247,11 @@ def main():
         epilog="""
 Examples:
   flashdet check                              Verify installation
+  flashdet download --list                    List available datasets
+  flashdet download --dataset coco2017        Download COCO 2017 dataset
+  flashdet download --dataset sample          Download tiny sample for testing
   flashdet train --train-images data/train --val-images data/val
+  flashdet train --config configs/flashdet_m_320_coco.yaml
   flashdet predict --model best.pth --source photo.jpg
   flashdet export --model best.pth --output model.onnx --simplify
 
@@ -234,23 +269,41 @@ Documentation: https://github.com/FlashVision/FlashDet
     # check
     subparsers.add_parser("check", help="Verify installation and run health check")
 
+    # download
+    dl_p = subparsers.add_parser("download", help="Download open-source datasets (COCO, VOC, etc.)")
+    dl_p.add_argument("--list", action="store_true", help="List all available datasets")
+    dl_p.add_argument("--dataset", default=None,
+                       help="Dataset ID to download (e.g. coco2017, voc2007, sample)")
+    dl_p.add_argument("--output", default=None,
+                       help="Output directory (default: data/<dataset>)")
+    dl_p.add_argument("--cache-dir", default=None,
+                       help="Cache directory for archives (default: ~/.cache/flashdet/)")
+
+    # datasets (alias for download --list)
+    subparsers.add_parser("datasets", help="List available datasets for download")
+
     # train
     train_p = subparsers.add_parser("train", help="Train a FlashDet model")
     train_p.add_argument("--config", default=None, help="Path to YAML config (e.g. configs/flashdet_m_320_coco.yaml)")
     train_p.add_argument("--model-size", default="m", choices=["m-0.5x", "m", "m-1.5x"],
                          help="Model variant (default: m)")
+    train_p.add_argument("--architecture", default="flashdet",
+                         choices=["flashdet", "detr", "rt-detr", "yolov9", "yolov10", "yolov11", "grounding-dino"],
+                         help="Detection architecture (default: flashdet)")
     train_p.add_argument("--epochs", type=int, default=100, help="Training epochs (default: 100)")
     train_p.add_argument("--batch-size", type=int, default=32, help="Batch size (default: 32)")
     train_p.add_argument("--lr", type=float, default=None, help="Learning rate")
     train_p.add_argument("--device", default="cuda", help="Device: cuda or cpu (default: cuda)")
     train_p.add_argument("--train-images", default=None, help="Path to training images")
     train_p.add_argument("--val-images", default=None, help="Path to validation images")
-    train_p.add_argument("--save-dir", default="workspace/train", help="Output directory")
+    train_p.add_argument("--save-dir", default="workspace/flashdet_output", help="Output directory")
     train_p.add_argument("--workers", type=int, default=None, help="DataLoader workers")
     train_p.add_argument("--lora", action="store_true", help="Enable LoRA fine-tuning")
     train_p.add_argument("--qlora", action="store_true", help="Enable QLoRA fine-tuning")
     train_p.add_argument("--amp", action="store_true", help="Enable mixed precision (FP16)")
     train_p.add_argument("--pretrained-coco", action="store_true", help="Start from COCO weights")
+    train_p.add_argument("--mosaic", action="store_true", help="Enable mosaic augmentation")
+    train_p.add_argument("--mixup", action="store_true", help="Enable MixUp augmentation")
 
     # predict
     pred_p = subparsers.add_parser("predict", help="Run inference on image/video/directory")
@@ -283,6 +336,8 @@ Documentation: https://github.com/FlashVision/FlashDet
         "version": cmd_version,
         "settings": cmd_settings,
         "check": cmd_check,
+        "download": cmd_download,
+        "datasets": cmd_datasets,
         "train": cmd_train,
         "predict": cmd_predict,
         "val": cmd_val,

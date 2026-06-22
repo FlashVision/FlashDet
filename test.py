@@ -31,17 +31,18 @@ import torch
 
 from flashdet.cfg import get_config
 from flashdet.models import FlashDet, load_coco_pretrained
+from flashdet.models.detector import build_model
 from flashdet.data.transforms import InferenceTransform
 from flashdet.utils import draw_detections, load_checkpoint
 from flashdet.utils.visualization import make_gt_pred_panel, draw_boxes, make_color_palette
 
 
 class FlashDetDetector:
-    """FlashDet inference wrapper.
+    """Inference wrapper supporting all FlashDet architectures.
 
-    Class names are read from the checkpoint's embedded 'config' dict so that
-    models trained on any dataset (PPE, Indoor Objects, custom) always display
-    the correct labels without any code changes.
+    Class names and architecture type are read from the checkpoint's embedded
+    'config' dict so that models trained on any dataset always display the
+    correct labels without any code changes.
     """
 
     def __init__(
@@ -60,14 +61,7 @@ class FlashDetDetector:
 
         config = get_config()
 
-        MODEL_SIZE_MAP = {
-            "m":     {"backbone": "1.0x", "fpn_channels": 96},
-            "m-1.5x": {"backbone": "1.5x", "fpn_channels": 128},
-            "m-0.5x": {"backbone": "0.5x", "fpn_channels": 96},
-        }
-
         if pretrained_coco:
-            # COCO pretrained mode — 80 classes, no custom checkpoint needed
             COCO_NAMES = [
                 "person", "bicycle", "car", "motorcycle", "airplane", "bus",
                 "train", "truck", "boat", "traffic light", "fire hydrant",
@@ -85,48 +79,36 @@ class FlashDetDetector:
                 "clock", "vase", "scissors", "teddy bear", "hair drier",
                 "toothbrush",
             ]
-            mcfg = MODEL_SIZE_MAP.get(model_size, MODEL_SIZE_MAP["m"])
             self.CLASS_NAMES = COCO_NAMES
             self.input_size = (input_size, input_size)
 
             self.model = FlashDet(
                 num_classes=80,
-                input_size=self.input_size,
-                backbone_size=mcfg["backbone"],
-                fpn_channels=mcfg["fpn_channels"],
-                pretrained=False,
-                use_aux_head=False,
-            )
-            load_coco_pretrained(
-                self.model,
-                backbone_size=mcfg["backbone"],
-                fpn_channels=mcfg["fpn_channels"],
-                input_size=input_size,
+                size=model_size if model_size in ("n", "s", "m", "l", "x") else "n",
             )
             print(f"COCO pretrained model loaded ({model_size}, {input_size}px, 80 classes)")
 
         else:
-            # Load from a user-trained checkpoint
             if model_path is None:
                 raise ValueError("Either --model or --pretrained-coco is required")
 
             checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
 
-            backbone_size = config.model.backbone_size
             num_classes   = config.model.num_classes
-            fpn_channels  = config.model.fpn_out_channels
             inp_size      = config.model.input_size
             class_names   = list(config.class_names)
+            arch = "flashdet"
+            ckpt_model_size = "n"
 
             if "config" in checkpoint:
                 ckpt_cfg = checkpoint["config"]
-                backbone_size = ckpt_cfg.get("backbone_size", backbone_size)
                 num_classes   = ckpt_cfg.get("num_classes", num_classes)
-                fpn_channels  = ckpt_cfg.get("fpn_channels", fpn_channels)
                 inp_size      = ckpt_cfg.get("input_size", inp_size)
+                arch          = ckpt_cfg.get("architecture", "flashdet")
+                ckpt_model_size = ckpt_cfg.get("model_size", "n")
                 if "class_names" in ckpt_cfg and ckpt_cfg["class_names"]:
                     class_names = ckpt_cfg["class_names"]
-                print(f"Detected from checkpoint: backbone={backbone_size}, classes={num_classes}")
+                print(f"Detected from checkpoint: arch={arch}, size={ckpt_model_size}, classes={num_classes}")
 
             if len(class_names) != num_classes:
                 print(
@@ -140,14 +122,15 @@ class FlashDetDetector:
 
             print(f"Loading model: {model_path}")
 
-            self.model = FlashDet(
-                num_classes=num_classes,
-                input_size=inp_size,
-                backbone_size=backbone_size,
-                fpn_channels=fpn_channels,
-                pretrained=False,
-                use_aux_head=False,
-            )
+            arch = arch.lower()
+            if arch in ("flashdet", ""):
+                self.model = FlashDet(
+                    num_classes=num_classes,
+                    size=ckpt_model_size,
+                )
+            else:
+                config.model.num_classes = num_classes
+                self.model = build_model(config, architecture=arch)
 
             if "model_state_dict" in checkpoint:
                 self.model.load_state_dict(checkpoint["model_state_dict"], strict=False)
@@ -160,9 +143,14 @@ class FlashDetDetector:
         self.model = self.model.to(self.device).eval()
         self.transform = InferenceTransform(input_size=self.input_size)
 
-        info = self.model.get_model_info()
-        print(f"Device: {self.device}")
-        print(f"Model: {info['name']}  Params: {info['total_params']:,}")
+        if hasattr(self.model, "get_model_info"):
+            info = self.model.get_model_info()
+            print(f"Device: {self.device}")
+            print(f"Model: {info['name']}  Params: {info['total_params']:,}")
+        else:
+            total_params = sum(p.numel() for p in self.model.parameters())
+            print(f"Device: {self.device}")
+            print(f"Model: {arch}  Params: {total_params:,}")
 
     @torch.no_grad()
     def detect(self, image: np.ndarray):
@@ -455,7 +443,7 @@ def main():
     parser.add_argument("--show", action="store_true", help="Show output window")
     parser.add_argument("--pretrained-coco", action="store_true",
                         help="Use official COCO pretrained weights (80 classes, no fine-tuning)")
-    parser.add_argument("--model-size", default="m", choices=["m", "m-1.5x", "m-0.5x"],
+    parser.add_argument("--model-size", default="n", choices=["n", "s", "m", "l", "x"],
                         help="Model size (only used with --pretrained-coco)")
     parser.add_argument("--input-size", type=int, default=416,
                         help="Input resolution (only used with --pretrained-coco)")

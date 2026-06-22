@@ -1,4 +1,7 @@
-"""FlashDet Predictor — inference on images, video, or webcam."""
+"""FlashDet Predictor — inference on images, video, or webcam.
+
+Supports all architectures: FlashDet, DETR, RT-DETR, YOLOv9, YOLOv10, YOLOv11.
+"""
 
 import os
 import time
@@ -12,6 +15,7 @@ import torch
 
 from flashdet.cfg import get_config
 from flashdet.models import FlashDet, load_coco_pretrained
+from flashdet.models.detector import build_model, ARCHITECTURE_REGISTRY
 from flashdet.data.transforms import InferenceTransform
 from flashdet.utils import draw_detections
 
@@ -19,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class Predictor:
-    """High-level inference wrapper for FlashDet.
+    """High-level inference wrapper for all FlashDet architectures.
 
     Example::
 
@@ -100,6 +104,7 @@ class Predictor:
             fpn_channels = config.model.fpn_out_channels
             inp_size = config.model.input_size
             class_names = list(config.class_names)
+            arch = "flashdet"
 
             if "config" in checkpoint:
                 ckpt_cfg = checkpoint["config"]
@@ -107,20 +112,26 @@ class Predictor:
                 num_classes = ckpt_cfg.get("num_classes", num_classes)
                 fpn_channels = ckpt_cfg.get("fpn_channels", fpn_channels)
                 inp_size = ckpt_cfg.get("input_size", inp_size)
+                arch = ckpt_cfg.get("architecture", "flashdet")
                 if "class_names" in ckpt_cfg and ckpt_cfg["class_names"]:
                     class_names = ckpt_cfg["class_names"]
 
             self.class_names = class_names
             self.input_size = inp_size
 
-            self.model = FlashDet(
-                num_classes=num_classes,
-                input_size=inp_size,
-                backbone_size=backbone_size,
-                fpn_channels=fpn_channels,
-                pretrained=False,
-                use_aux_head=False,
-            )
+            arch = arch.lower()
+            if arch in ("flashdet", ""):
+                self.model = FlashDet(
+                    num_classes=num_classes,
+                    input_size=inp_size,
+                    backbone_size=backbone_size,
+                    fpn_channels=fpn_channels,
+                    pretrained=False,
+                    use_aux_head=False,
+                )
+            else:
+                config.model.num_classes = num_classes
+                self.model = build_model(config, architecture=arch)
 
             if "model_state_dict" in checkpoint:
                 self.model.load_state_dict(checkpoint["model_state_dict"], strict=False)
@@ -129,6 +140,8 @@ class Predictor:
                 self.model.load_state_dict(sd, strict=False)
             else:
                 self.model.load_state_dict(checkpoint, strict=False)
+
+            logger.info(f"Model loaded: {arch} ({num_classes} classes)")
 
         self.model = self.model.to(self.device).eval()
         self.transform = InferenceTransform(input_size=self.input_size)

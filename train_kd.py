@@ -67,44 +67,7 @@ MODEL_SIZE_MAP = {
 }
 
 
-class ModelEMA:
-    """Exponential Moving Average of model weights (same as train.py)."""
-    def __init__(self, model, decay=0.9998, warmup=2000):
-        self.ema = copy.deepcopy(model)
-        self.ema.eval()
-        self.target_decay = decay
-        self.warmup = warmup
-        self.num_updates = 0
-        for p in self.ema.parameters():
-            p.requires_grad_(False)
-
-    @property
-    def decay(self):
-        return min(self.target_decay,
-                   (1 + self.num_updates) / (self.warmup + self.num_updates))
-
-    @torch.no_grad()
-    def update(self, model):
-        self.num_updates += 1
-        d = self.decay
-        for ema_p, model_p in zip(self.ema.parameters(), model.parameters()):
-            ema_p.data.mul_(d).add_(model_p.data, alpha=1.0 - d)
-        for ema_b, model_b in zip(self.ema.buffers(), model.buffers()):
-            ema_b.copy_(model_b)
-
-    def state_dict(self):
-        return {
-            "ema_state": self.ema.state_dict(),
-            "target_decay": self.target_decay,
-            "warmup": self.warmup,
-            "num_updates": self.num_updates,
-        }
-
-    def load_state_dict(self, state):
-        self.ema.load_state_dict(state["ema_state"], strict=False)
-        self.target_decay = state.get("target_decay", self.target_decay)
-        self.warmup = state.get("warmup", self.warmup)
-        self.num_updates = state.get("num_updates", 0)
+from flashdet.engine.core.ema import ModelEMA
 
 
 def _load_class_names_from_ann(ann_file):

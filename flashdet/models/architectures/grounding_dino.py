@@ -17,151 +17,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from flashdet.registry import BACKBONES
+from flashdet.registry import DETECTORS
+from flashdet.models.backbone.resnet import ResNetBackbone
+from flashdet.models.backbone.text_encoder import TextEncoder
+from flashdet.models.transformer.vision_language_fusion import VisionLanguageFusion
+from flashdet.models.head.grounding_dino_decoder import GroundingDINODecoder
 
 logger = logging.getLogger(__name__)
 
 
-class TextEncoder(nn.Module):
-    """Lightweight text encoder using a transformer, or wrapping CLIP/BERT if available.
-
-    Falls back to a trainable token embedding + transformer encoder when
-    no pretrained CLIP model is found, so the module is always usable.
-    """
-
-    def __init__(self, vocab_size: int = 49408, embed_dim: int = 256, max_len: int = 77, depth: int = 4, nhead: int = 8):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.max_len = max_len
-
-        self.token_embed = nn.Embedding(vocab_size, embed_dim)
-        self.pos_embed = nn.Parameter(torch.zeros(1, max_len, embed_dim))
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
-
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim, nhead=nhead, dim_feedforward=embed_dim * 4,
-            dropout=0.1, batch_first=True, norm_first=True,
-        )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=depth, enable_nested_tensor=False)
-        self.ln = nn.LayerNorm(embed_dim)
-
-    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
-        """
-        Args:
-            input_ids: [B, L] integer token ids.
-            attention_mask: [B, L] binary mask (1 = valid, 0 = padding).
-
-        Returns:
-            [B, L, embed_dim] contextualised text features.
-        """
-        x = self.token_embed(input_ids) + self.pos_embed[:, :input_ids.shape[1]]
-
-        if attention_mask is not None:
-            src_key_padding_mask = (attention_mask == 0)
-        else:
-            src_key_padding_mask = None
-
-        x = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
-        return self.ln(x)
-
-
-class VisionLanguageFusion(nn.Module):
-    """Bi-directional cross-attention between visual and text features."""
-
-    def __init__(self, d_model: int = 256, nhead: int = 8):
-        super().__init__()
-        self.v2t_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
-        self.t2v_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
-        self.v_norm = nn.LayerNorm(d_model)
-        self.t_norm = nn.LayerNorm(d_model)
-        self.v_ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model))
-        self.t_ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model))
-        self.v_ffn_norm = nn.LayerNorm(d_model)
-        self.t_ffn_norm = nn.LayerNorm(d_model)
-
-    def forward(
-        self,
-        visual_feat: torch.Tensor,
-        text_feat: torch.Tensor,
-        text_mask: torch.Tensor = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        key_padding = (text_mask == 0) if text_mask is not None else None
-
-        v_res = self.v2t_attn(visual_feat, text_feat, text_feat, key_padding_mask=key_padding)[0]
-        visual_feat = self.v_norm(visual_feat + v_res)
-        visual_feat = self.v_ffn_norm(visual_feat + self.v_ffn(visual_feat))
-
-        t_res = self.t2v_attn(text_feat, visual_feat, visual_feat)[0]
-        text_feat = self.t_norm(text_feat + t_res)
-        text_feat = self.t_ffn_norm(text_feat + self.t_ffn(text_feat))
-
-        return visual_feat, text_feat
-
-
-class GroundingDINODecoder(nn.Module):
-    """Transformer decoder with language-aware cross-attention."""
-
-    def __init__(self, d_model: int = 256, nhead: int = 8, num_layers: int = 6, num_queries: int = 900):
-        super().__init__()
-        self.num_queries = num_queries
-        self.d_model = d_model
-
-        self.query_embed = nn.Embedding(num_queries, d_model)
-
-        self.layers = nn.ModuleList()
-        for _ in range(num_layers):
-            self.layers.append(nn.ModuleDict({
-                "self_attn": nn.MultiheadAttention(d_model, nhead, batch_first=True),
-                "cross_attn_vis": nn.MultiheadAttention(d_model, nhead, batch_first=True),
-                "cross_attn_text": nn.MultiheadAttention(d_model, nhead, batch_first=True),
-                "norm1": nn.LayerNorm(d_model),
-                "norm2": nn.LayerNorm(d_model),
-                "norm3": nn.LayerNorm(d_model),
-                "norm4": nn.LayerNorm(d_model),
-                "ffn": nn.Sequential(
-                    nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model),
-                ),
-            }))
-
-        self.bbox_head = nn.Sequential(
-            nn.Linear(d_model, d_model), nn.ReLU(inplace=True),
-            nn.Linear(d_model, d_model), nn.ReLU(inplace=True),
-            nn.Linear(d_model, 4),
-        )
-
-    def forward(
-        self,
-        visual_feat: torch.Tensor,
-        text_feat: torch.Tensor,
-        text_mask: torch.Tensor = None,
-    ) -> Dict[str, torch.Tensor]:
-        B = visual_feat.shape[0]
-        queries = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
-
-        key_padding = (text_mask == 0) if text_mask is not None else None
-
-        hs = queries
-        for layer in self.layers:
-            hs2 = layer["self_attn"](hs, hs, hs)[0]
-            hs = layer["norm1"](hs + hs2)
-
-            hs2 = layer["cross_attn_vis"](hs, visual_feat, visual_feat)[0]
-            hs = layer["norm2"](hs + hs2)
-
-            hs2 = layer["cross_attn_text"](hs, text_feat, text_feat, key_padding_mask=key_padding)[0]
-            hs = layer["norm3"](hs + hs2)
-
-            hs = layer["norm4"](hs + layer["ffn"](hs))
-
-        pred_boxes = self.bbox_head(hs).sigmoid()
-
-        # Language-aware classification: dot-product similarity with text tokens
-        pred_logits = torch.bmm(hs, text_feat.transpose(1, 2))
-
-        return {"pred_logits": pred_logits, "pred_boxes": pred_boxes}
-
-
-@BACKBONES.register("GroundingDINO")
+@DETECTORS.register("GroundingDINO")
 class GroundingDINO(nn.Module):
     """Grounding DINO: open-vocabulary object detector.
 
@@ -199,22 +64,7 @@ class GroundingDINO(nn.Module):
         self.num_queries = num_queries
         self.d_model = d_model
 
-        import torchvision.models as tv
-        backbone_map = {
-            "resnet50": (tv.resnet50, 2048),
-            "resnet101": (tv.resnet101, 2048),
-        }
-        builder, vis_ch = backbone_map.get(backbone, (tv.resnet50, 2048))
-        weights = "DEFAULT" if pretrained_backbone else None
-        resnet = builder(weights=weights)
-        self.visual_backbone = nn.Sequential(
-            resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool,
-            resnet.layer1, resnet.layer2, resnet.layer3, resnet.layer4,
-        )
-        self.visual_proj = nn.Sequential(
-            nn.Conv2d(vis_ch, d_model, 1, bias=False),
-            nn.BatchNorm2d(d_model),
-        )
+        self.visual_backbone = ResNetBackbone(backbone, d_model, pretrained_backbone)
 
         self.text_encoder = TextEncoder(
             vocab_size=vocab_size, embed_dim=d_model,
@@ -238,7 +88,7 @@ class GroundingDINO(nn.Module):
         gt_meta: Optional[Dict] = None,
         **kwargs,
     ) -> Dict:
-        vis_feat = self.visual_proj(self.visual_backbone(images))
+        vis_feat = self.visual_backbone(images)
         B, C, H, W = vis_feat.shape
         vis_tokens = vis_feat.flatten(2).permute(0, 2, 1)
 
@@ -265,7 +115,7 @@ class GroundingDINO(nn.Module):
         device = pred_logits.device
         B = pred_logits.shape[0]
 
-        total_cls, total_l1, _total_giou = [], [], []
+        total_cls, total_l1 = [], []
 
         for b in range(B):
             gt_b = torch.as_tensor(gt_meta["gt_bboxes"][b], dtype=torch.float32, device=device)

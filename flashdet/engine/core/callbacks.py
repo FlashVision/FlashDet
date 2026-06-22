@@ -4,7 +4,7 @@ Extensible hook points for the training loop. Users can add custom
 behavior without modifying the Trainer source code.
 
 Usage:
-    from flashdet.engine.callbacks import Callback, CallbackList
+    from flashdet.engine.core.callbacks import Callback, CallbackList
 
     class WandbLogger(Callback):
         def on_epoch_end(self, trainer, epoch, metrics):

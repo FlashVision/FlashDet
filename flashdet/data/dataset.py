@@ -1,5 +1,5 @@
 """
-PPE Detection Dataset.
+FlashDet Detection Dataset — generic COCO-format loader.
 """
 
 import json
@@ -12,21 +12,16 @@ from torch.utils.data import Dataset
 from typing import Dict, Tuple, Callable, List
 
 
-class PPEDataset(Dataset):
+class FlashDetDataset(Dataset):
     """
-    PPE Detection dataset in COCO format.
-    
+    Generic COCO-format detection dataset for FlashDet.
+
     Args:
         img_dir: Directory containing images.
         ann_file: Path to COCO annotation JSON.
         transform: Transform function.
         input_size: Input image size (width, height).
     """
-    
-    CLASS_NAMES = [
-        "Hardhat", "Mask", "NO-Hardhat", "NO-Mask", "NO-Safety Vest",
-        "Person", "Safety Cone", "Safety Vest", "machinery", "vehicle"
-    ]
     
     def __init__(
         self,
@@ -78,7 +73,6 @@ class PPEDataset(Dataset):
         self.img_ids = sorted(list(self.images.keys()))
 
         total_anns = len(self.coco["annotations"])
-        import logging
         logging.getLogger(__name__).info(
             "Loaded %d images, %d annotations%s",
             len(self.img_ids), total_anns,
@@ -162,6 +156,29 @@ class PPEDataset(Dataset):
             }
         }
     
+    def get_raw_item(self, idx: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return raw (image, boxes, labels) without transform — used by Mosaic/MixUp."""
+        img_id = self.img_ids[idx]
+        img_info = self.images[img_id]
+        img_path = os.path.join(self.img_dir, img_info["file_name"])
+        image = cv2.imread(img_path)
+        if image is None:
+            image = np.full((64, 64, 3), 114, dtype=np.uint8)
+            return image, np.zeros((0, 4), dtype=np.float32), np.zeros((0,), dtype=np.int64)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        anns = self.img_to_anns.get(img_id, [])
+        boxes, labels = [], []
+        for ann in anns:
+            x, y, w, h = ann["bbox"]
+            cat_id = ann["category_id"]
+            if cat_id not in self.cat_id_to_idx:
+                continue
+            boxes.append([x, y, x + w, y + h])
+            labels.append(self.cat_id_to_idx[cat_id])
+        boxes = np.array(boxes, dtype=np.float32) if boxes else np.zeros((0, 4), dtype=np.float32)
+        labels = np.array(labels, dtype=np.int64) if labels else np.zeros((0,), dtype=np.int64)
+        return image, boxes, labels
+
     def _default_transform(self, image: np.ndarray, boxes: np.ndarray) -> Tuple[torch.Tensor, np.ndarray]:
         """Default image transform with box rescaling."""
         orig_h, orig_w = image.shape[:2]
@@ -189,6 +206,9 @@ class PPEDataset(Dataset):
         image = torch.from_numpy(image.transpose(2, 0, 1)).float()
         
         return image, boxes
+
+
+PPEDataset = FlashDetDataset
 
 
 def collate_fn(batch: List[Dict]) -> Tuple[torch.Tensor, Dict]:
