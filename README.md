@@ -15,17 +15,17 @@
 </p>
 
 <p align="center">
-  <b>Ultra-lightweight real-time object detection with LoRA fine-tuning, knowledge distillation, tracking, and analytics</b>
+  <b>YOLO26-based real-time object detection with multi-architecture support, advanced training methods, LoRA fine-tuning, tracking, and analytics</b>
 </p>
 
 <p align="center">
   <a href="#installation">Install</a> •
+  <a href="#architectures">Architectures</a> •
   <a href="#usage">Usage</a> •
-  <a href="#models">Models</a> •
-  <a href="#examples">Examples</a> •
+  <a href="#training-methods">Training Methods</a> •
   <a href="#solutions">Solutions</a> •
   <a href="#trackers">Trackers</a> •
-  <a href="#training">Training</a> •
+  <a href="#project-structure">Structure</a> •
   <a href="#contributing">Contributing</a>
 </p>
 
@@ -33,16 +33,41 @@
 
 ## What is FlashDet?
 
-FlashDet is an end-to-end object detection framework built for **speed and efficiency**. Based on the NanoDet-Plus architecture with a ShuffleNetV2 backbone, it delivers real-time inference with models as small as 0.49M parameters.
+FlashDet is an end-to-end object detection framework built for **speed, accuracy, and extensibility**. The core FlashDet model is built on **YOLO26** principles with a dual detection head (NMS-free one-to-one + dense one-to-many), **STAL** (Small-Target-Aware Label Assignment), **ProgLoss** (Progressive Loss Balancing), and the **MuSGD** (Muon+SGD hybrid) optimizer.
 
-It ships as a `pip`-installable Python package with a CLI, a high-level Python API, and built-in solutions for counting, tracking, speed estimation, and more — similar to how you'd use Ultralytics YOLO.
+Beyond the FlashDet architecture, the framework supports **7 detector architectures** and **6 training methods** — all through a unified, registry-based, pluggable design.
 
-```bash
-pip install -e .
-flashdet train --model-size m --epochs 100 --device cuda --train-images data/train --val-images data/val
-flashdet predict --model best.pth --source video.mp4
 ```
+Training Pipeline:
+  Dataset → Augmentation → YOLO26 Model
+    ├── Classification Loss (BCE)
+    ├── Box Loss (CIoU + L1, ProgLoss weighted)
+    └── STAL Assignment
+        → MuSGD → Updated Weights
+```
+---
 
+## Architectures
+
+FlashDet ships with 7 detector architectures, all accessible via a unified API:
+
+| Architecture | Description | Key Features |
+|---|---|---|
+| **FlashDet** | YOLO26-based lightweight detector | Dual-head, STAL, ProgLoss, DFL-free |
+| **DETR** | DEtection TRansformer | End-to-end, no NMS, Hungarian matching |
+| **RT-DETR** | Real-Time DETR | HybridEncoder, efficient transformer |
+| **YOLOv9** | PGI + GELAN architecture | Programmable Gradient Information |
+| **YOLOv10** | NMS-free real-time YOLO | Dual assignment, efficiency-accuracy |
+| **YOLOv11** | Latest YOLO with C3k2 + C2PSA | PSA attention, state-of-the-art speed |
+| **GroundingDINO** | Open-vocabulary detector | Text-conditioned detection |
+
+### FlashDet Model Sizes
+
+| Model | Width | Depth | Params |
+|---|---|---|---|
+| **FlashDet-N** | 0.25 | 0.33 | ~1.5M |
+| **FlashDet-S** | 0.50 | 0.33 | ~5.4M |
+| **FlashDet-M** | 1.00 | 0.67 | ~18M |
 ---
 
 ## Installation
@@ -90,20 +115,24 @@ flashdet version     # prints version
 
 ```python
 from flashdet import FlashDet, Trainer, Predictor, Exporter
+from flashdet.models.detector import build_model
+from flashdet.cfg import get_config
 
-# Train a model
+# Build any architecture
+config = get_config(num_classes=80)
+model = build_model(config, architecture="flashdet")  # or "detr", "yolov11", etc.
+
+# Train
 trainer = Trainer(
-    model_size="m",
+    model_size="n",
     train_images="data/train",
     val_images="data/val",
     epochs=100,
     device="cuda",
-    use_lora=True,
-    pretrained_coco=True,
 )
 trainer.train()
 
-# Run inference
+# Inference
 predictor = Predictor(model_path="workspace/best.pth", device="cuda")
 results = predictor.predict("photo.jpg")
 
@@ -116,8 +145,8 @@ exporter.export(output="model.onnx", simplify=True)
 
 ```bash
 # Train
-flashdet train --model-size m --epochs 100 --device cuda \
-  --train-images data/train --val-images data/val --pretrained-coco
+flashdet train --model-size n --epochs 100 --device cuda \
+  --train-images data/train --val-images data/val
 
 # Predict
 flashdet predict --model best.pth --source image.jpg --conf 0.25
@@ -135,110 +164,68 @@ flashdet export --model best.pth --output model.onnx --simplify
 # Full training with LoRA
 python train.py --lora --lora-rank 8 --epochs 50 --device cuda
 
-# Knowledge Distillation
-python train_kd.py --teacher-checkpoint teacher.pth --teacher-size m-1.5x --model-size m-0.5x
-
 # Inference
 python test.py --model best.pth --image photo.jpg
 ```
 
 ---
 
-## Models
+## Training Methods
 
-| Model | Params | FP16 Size | INT8 Size | mAP (COCO) | GPU (ms) |
-|-------|--------|-----------|-----------|------------|----------|
-| **FlashDet-m-0.5x** | 0.49M | ~1.2 MB | ~0.6 MB | — | 3.8 |
-| **FlashDet-m** | 1.17M | ~2.6 MB | ~1.3 MB | 27.0 | 5.3 |
-| **FlashDet-m-1.5x** | 2.44M | ~5.2 MB | ~2.6 MB | 29.9 | 7.2 |
+FlashDet supports 6 training paradigms, each with a dedicated trainer class and CLI script:
 
-All models auto-download COCO pretrained weights on first use.
+| Method | Trainer Class | CLI Script | Description |
+|---|---|---|---|
+| **Standard** | `Trainer` | `train.py` | Full supervised training with all augmentations |
+| **Knowledge Distillation** | `KDTrainer` | `scripts/train_kd.py` | Teach a small student from a larger teacher |
+| **Self-Supervised (SSL)** | `SSLTrainer` | `scripts/train_ssl.py` | BYOL pretraining on unlabeled data |
+| **Semi-Supervised** | `SemiSupervisedTrainer` | `scripts/train_semi_supervised.py` | Teacher-student with pseudo-labels |
+| **Few-Shot** | `FewShotTrainer` | `scripts/train_few_shot.py` | Learn from very few labeled examples |
+| **Active Learning** | `ActiveLearningTrainer` | `scripts/train_active_learning.py` | Intelligently select samples for labeling |
 
-### Config-driven Training (Model Zoo)
-
-Pick a config and train — no code changes needed:
-
-```bash
-flashdet train --config configs/flashdet_m_320_coco.yaml --device cuda
-flashdet train --config configs/flashdet_m_320_lora.yaml --device cuda
-flashdet train --config configs/flashdet_m_320_kd.yaml --device cuda
-```
-
-Available configs in [`configs/`](configs/):
-| Config | Description |
-|--------|-------------|
-| `flashdet_m_320_coco.yaml` | Standard FlashDet-m training on COCO |
-| `flashdet_m_416_coco.yaml` | FlashDet-m at higher resolution |
-| `flashdet_m15x_320_coco.yaml` | Larger model for better accuracy |
-| `flashdet_m05x_320_coco.yaml` | Ultra-light for edge deployment |
-| `flashdet_m_320_lora.yaml` | LoRA fine-tuning on custom data |
-| `flashdet_m_320_kd.yaml` | Knowledge distillation |
-
----
-
-## Solutions
-
-Built-in high-level applications for real-world use cases:
-
-```python
-from flashdet import Predictor
-from flashdet.solutions import ObjectCounter, SpeedEstimator, Heatmap, ParkingManager
-from flashdet.trackers import ByteTracker
-
-predictor = Predictor(model_path="best.pth")
-tracker = ByteTracker()
-
-# Count objects crossing a line
-counter = ObjectCounter(predictor, tracker, line_points=[(100, 300), (500, 300)])
-
-# Estimate speeds
-estimator = SpeedEstimator(predictor, tracker, pixels_per_meter=8.0)
-
-# Generate heatmaps
-heatmap = Heatmap(predictor, decay=0.95)
-
-# Monitor parking
-parking = ParkingManager(predictor, spots_file="spots.json")
-```
-
-| Solution | Description |
-|----------|-------------|
-| **ObjectCounter** | Count objects crossing lines or entering regions |
-| **SpeedEstimator** | Estimate real-world speed from tracked objects |
-| **Heatmap** | Visualize detection density over time |
-| **RegionCounter** | Count objects in polygon zones |
-| **QueueManager** | Monitor queue lengths and wait times |
-| **DistanceCalculator** | Measure real-world distances between objects |
-| **ParkingManager** | Track parking spot occupancy |
-| **SecurityAlarm** | Alert on intrusions into restricted zones |
-
----
-
-## Trackers
-
-Multi-object tracking with persistent IDs across frames:
-
-```python
-from flashdet.trackers import ByteTracker, SORTTracker, BoTSORT
-
-tracker = ByteTracker(max_age=30, min_hits=3, iou_threshold=0.3)
-tracks = tracker.update(detections)  # [x1,y1,x2,y2,track_id,score,cls]
-```
-
-| Tracker | Method | Best For |
-|---------|--------|----------|
-| **ByteTracker** | IoU + Kalman filter | General purpose, fast |
-| **SORTTracker** | Simple Kalman + Hungarian | Speed-critical applications |
-| **BoTSORT** | Appearance + motion | Crowded scenes, re-identification |
-
----
-
-## Training
-
-### Standard Training
+### Knowledge Distillation
 
 ```bash
-python train.py --model-size m --epochs 100 --batch-size 32 --device cuda --pretrained-coco
+python scripts/train_kd.py \
+  --teacher-checkpoint path/to/teacher.pth \
+  --teacher-size n \
+  --model-size n \
+  --kd-temperature 4.0
+```
+
+### Self-Supervised Pretraining
+
+```bash
+python scripts/train_ssl.py \
+  --method byol \
+  --data-dir path/to/unlabeled/images \
+  --epochs 100 --backbone-size n
+```
+
+### Semi-Supervised Learning
+
+```bash
+python scripts/train_semi_supervised.py \
+  --train-images data/train \
+  --unlabeled-dir path/to/unlabeled/images \
+  --pseudo-threshold 0.7
+```
+
+### Few-Shot Learning
+
+```bash
+python scripts/train_few_shot.py \
+  --base-checkpoint path/to/base.pth \
+  --n-shot 10 --freeze-backbone
+```
+
+### Active Learning
+
+```bash
+python scripts/train_active_learning.py \
+  --train-images data/train \
+  --unlabeled-pool path/to/unlabeled/images \
+  --query-strategy entropy --budget 50 --rounds 5
 ```
 
 ### LoRA / QLoRA Fine-Tuning
@@ -253,18 +240,6 @@ python train.py --lora --lora-variant dora --lora-rank 8 --lora-alpha 16
 python train.py --qlora --qlora-dtype nf4 --lora-rank 8
 ```
 
-### Knowledge Distillation
-
-Train a small student from a larger teacher:
-
-```bash
-python train_kd.py \
-  --teacher-checkpoint workspace/teacher/best.pth \
-  --teacher-size m-1.5x \
-  --model-size m-0.5x \
-  --kd-temperature 4.0
-```
-
 ### Mixed Precision & Multi-GPU
 
 ```bash
@@ -273,28 +248,136 @@ python train.py --amp --multi-gpu --device cuda
 
 ---
 
+## Core Components
+
+### STAL (Small-Target-Aware Label Assignment)
+
+Task-Aligned Assignment with small-target protection — temporarily expands tiny GT boxes during candidate selection so small objects always get positive anchor supervision.
+
+### ProgLoss (Progressive Loss Balancing)
+
+Linearly shifts training emphasis from the dense one-to-many head (exploration) to the NMS-free one-to-one head (refinement) over the course of training: `alpha(t): 1.0 → 0.0`.
+
+### MuSGD (Muon + SGD Hybrid Optimizer)
+
+Applies Muon-style orthogonal updates to multi-dimensional parameters (conv weights, attention) while using standard SGD for 1D parameters (biases, norms), combining faster convergence with training stability.
+
+### E2E Detection Loss
+
+Combines CIoU box loss, BCE classification loss, and L1 regression loss across both dual heads, weighted by the ProgLoss schedule.
+
+---
+
+## Solutions
+
+Built-in high-level applications for real-world use cases:
+
+```python
+from flashdet import Predictor
+from flashdet.solutions import ObjectCounter, SpeedEstimator, Heatmap
+from flashdet.trackers import ByteTracker
+
+predictor = Predictor(model_path="best.pth")
+tracker = ByteTracker()
+
+counter = ObjectCounter(predictor, tracker, line_points=[(100, 300), (500, 300)])
+estimator = SpeedEstimator(predictor, tracker, pixels_per_meter=8.0)
+heatmap = Heatmap(predictor, decay=0.95)
+```
+
+| Solution | Description |
+|---|---|
+| **ObjectCounter** | Count objects crossing lines or entering regions |
+| **SpeedEstimator** | Estimate real-world speed from tracked objects |
+| **Heatmap** | Visualize detection density over time |
+| **RegionCounter** | Count objects in polygon zones |
+| **QueueManager** | Monitor queue lengths and wait times |
+| **DistanceCalculator** | Measure real-world distances between objects |
+| **ParkingManager** | Track parking spot occupancy |
+| **SecurityAlarm** | Alert on intrusions into restricted zones |
+| **WorkoutMonitor** | Track exercise repetitions and form |
+| **LiveInference** | Real-time webcam/stream detection |
+| **AnalyticsDashboard** | Aggregated detection statistics and visualization |
+---
+
+## Trackers
+
+Multi-object tracking with persistent IDs across frames:
+
+```python
+from flashdet.trackers import ByteTracker, SORTTracker, BoTSORT
+
+tracker = ByteTracker(max_age=30, min_hits=3, iou_threshold=0.3)
+tracks = tracker.update(detections)  # [x1,y1,x2,y2,track_id,score,cls]
+```
+
+| Tracker | Method | Best For |
+|---|---|---|
+| **ByteTracker** | IoU + Kalman filter | General purpose, fast |
+| **SORTTracker** | Simple Kalman + Hungarian | Speed-critical applications |
+| **BoTSORT** | Appearance + motion | Crowded scenes, re-identification |
+
+---
+
 ## Analytics
 
 ```python
 from flashdet.analytics import Benchmark, Profiler
 
-# Benchmark model speed
 bench = Benchmark(model_path="best.pth", device="cuda")
-results = bench.run()  # {'fps': 142.3, 'latency_ms': 7.0, 'params': 1170000, ...}
+results = bench.run()  # {'fps': ..., 'latency_ms': ..., 'params': ..., ...}
 
-# Profile layer-by-layer
 profiler = Profiler(model_path="best.pth")
 profiler.run()  # prints per-layer timing breakdown
 ```
 
 ---
 
+## Training Callbacks
+
+Extend the training loop without modifying source code:
+
+```python
+from flashdet import Trainer
+from flashdet.engine.core.callbacks import EarlyStopping, CSVLogger, TensorBoardCallback
+
+trainer = Trainer(model_size="n", train_images="data/train", val_images="data/val")
+
+trainer.add_callback(EarlyStopping(patience=20, metric="val_mAP"))
+trainer.add_callback(CSVLogger("metrics.csv"))
+trainer.add_callback(TensorBoardCallback("runs/exp1"))
+
+trainer.train()
+```
+
+Built-in callbacks: `EarlyStopping`, `CSVLogger`, `TensorBoardCallback`, `LRSchedulerCallback`.
+
+---
+
+## Registry System
+
+FlashDet uses a pluggable registry for all major components. Adding a new architecture, backbone, head, or loss is as simple as decorating your class:
+
+```python
+from flashdet.registry import DETECTORS, BACKBONES, HEADS
+
+@DETECTORS.register("MyDetector")
+class MyDetector(nn.Module):
+    ...
+
+# Later, build from config
+model = DETECTORS.build("MyDetector", num_classes=80)
+```
+
+Available registries: `DETECTORS`, `BACKBONES`, `NECKS`, `HEADS`, `LOSSES`, `DATASETS`, `TRANSFORMS`, `TRACKERS`.
+---
+
 ## Examples
 
-Ready-to-run scripts in the [`examples/`](examples/) folder:
+Ready-to-run scripts in [`examples/`](examples/):
 
 | Script | What it does |
-|--------|--------------|
+|---|---|
 | `train_custom_dataset.py` | Train on your own COCO-format dataset |
 | `train_with_lora.py` | LoRA fine-tuning (DoRA variant) |
 | `predict_image.py` | Detect objects in a single image |
@@ -315,54 +398,85 @@ python predict_image.py
 
 ```
 FlashDet/
-├── flashdet/                  # Main package (pip install -e .)
-│   ├── __init__.py            # Public API
-│   ├── cli.py                 # CLI entry point (flashdet command)
-│   ├── registry.py            # Pluggable component registry
-│   ├── cfg/                   # Configuration + YAML loading
-│   ├── data/                  # Datasets, loaders, transforms
-│   ├── engine/                # Trainer, Validator, Predictor, Exporter, Callbacks
-│   ├── models/                # ShuffleNetV2, GhostPAN, NanoDet head, LoRA
-│   ├── losses/                # QFL, GIoU, DFL, KD losses
-│   ├── nn/                    # Neural network building blocks
-│   ├── utils/                 # Metrics, visualization, checkpoint
-│   ├── trackers/              # ByteTracker, SORT, BoTSORT
-│   ├── solutions/             # Counting, speed, heatmaps, parking, security
-│   └── analytics/             # Benchmark, profiling, plots
-├── configs/                   # YAML configs for model zoo (pick & train)
-├── examples/                  # Ready-to-run example scripts
-├── tests/                     # Unit tests (pytest)
-├── docker/                    # Dockerfile + docker-compose
-├── train.py                   # Training script (LoRA, QLoRA, AMP, multi-GPU)
-├── train_kd.py                # Knowledge Distillation script
-├── test.py                    # Inference script
-├── scripts/                   # ONNX export, quantization, data prep
-├── pyproject.toml             # Package configuration
-├── CONTRIBUTING.md            # How to contribute
-├── CHANGELOG.md               # Version history
-└── LICENSE                    # MIT
+├── flashdet/                        # Main package
+│   ├── __init__.py                  # Public API
+│   ├── cli.py                       # CLI entry point (flashdet command)
+│   ├── registry.py                  # Pluggable component registry
+│   ├── cfg/                         # Configuration + YAML loading
+│   │   └── config.py
+│   ├── data/                        # Datasets, loaders, transforms, download
+│   │   ├── dataset.py
+│   │   ├── dataloader.py
+│   │   ├── augmentations.py
+│   │   ├── transforms.py
+│   │   ├── download.py
+│   │   └── prepare.py
+│   ├── engine/                      # Training, evaluation, inference, export
+│   │   ├── core/                    # Callbacks, EMA, MuSGD optimizer
+│   │   │   ├── callbacks.py
+│   │   │   ├── ema.py
+│   │   │   └── musgd.py
+│   │   ├── training/                # All training paradigms
+│   │   │   ├── trainer.py           # Standard Trainer
+│   │   │   ├── kd_trainer.py        # Knowledge Distillation
+│   │   │   ├── ssl_trainer.py       # Self-Supervised Learning
+│   │   │   ├── semi_supervised_trainer.py
+│   │   │   ├── few_shot_trainer.py
+│   │   │   └── active_learning_trainer.py
+│   │   ├── evaluation/              # Validator
+│   │   ├── inference/               # Predictor, postprocessing
+│   │   └── export/                  # ONNX exporter
+│   ├── models/                      # Model components
+│   │   ├── architectures/           # Full detector architectures
+│   │   │   ├── flashdet.py          # YOLO26-based FlashDet
+│   │   │   ├── detr.py
+│   │   │   ├── rt_detr.py
+│   │   │   ├── yolov9.py
+│   │   │   ├── yolov10.py
+│   │   │   ├── yolov11.py
+│   │   │   └── grounding_dino.py
+│   │   ├── backbone/                # ShuffleNetV2, ResNet, YOLOv9-11
+│   │   ├── neck/                    # GhostPAN, HybridEncoder, YOLO necks
+│   │   ├── head/                    # Detection heads (NanoDet, DETR, E2E, OBB)
+│   │   ├── layers/                  # ConvBNSiLU, C2f, C3k2, RepVGG, PSA, SPPF
+│   │   ├── transformer/             # DETR transformer, positional encoding
+│   │   ├── assignment/              # STAL, DSL, Hungarian matcher
+│   │   ├── detector.py              # build_model() factory
+│   │   └── lora.py                  # LoRA / QLoRA (6 variants)
+│   ├── losses/                      # Loss functions
+│   │   ├── e2e_loss.py              # E2E dual-head loss + ProgLoss
+│   │   ├── focal_loss.py            # QFL, DFL
+│   │   ├── iou_loss.py              # GIoU, CIoU
+│   │   ├── kd_loss.py               # Knowledge distillation losses
+│   │   ├── detr_loss.py
+│   │   ├── rt_detr_loss.py
+│   │   ├── yolo_loss.py
+│   │   └── varifocal_loss.py
+│   ├── utils/                       # Metrics, visualization, checkpoints
+│   ├── trackers/                    # ByteTracker, SORT, BoTSORT
+│   ├── solutions/                   # 11 ready-to-use vision solutions
+│   ├── analytics/                   # Benchmark, profiling, plots
+│   └── nn/                          # Additional neural network blocks
+├── scripts/                         # Specialized training & utility scripts
+│   ├── train_kd.py                  # Knowledge Distillation CLI
+│   ├── train_ssl.py                 # SSL pretraining CLI
+│   ├── train_semi_supervised.py     # Semi-Supervised CLI
+│   ├── train_few_shot.py            # Few-Shot CLI
+│   ├── train_active_learning.py     # Active Learning CLI
+│   ├── convert_pth_to_onnx.py
+│   ├── fp16_to_int8_quantize.py
+│   └── prepare_data.py
+├── configs/                         # YAML configs for model zoo
+├── examples/                        # Ready-to-run example scripts
+├── tests/                           # Unit & integration tests (pytest)
+├── docs/                            # Documentation (Training, Models, FAQ, etc.)
+├── docker/                          # Dockerfile + docker-compose
+├── assets/                          # Diagrams and images
+├── train.py                         # Main training entry point
+├── test.py                          # Main inference entry point
+├── pyproject.toml                   # Package configuration
+└── LICENSE                          # MIT
 ```
-
----
-
-## Training Callbacks
-
-Extend the training loop without modifying source code:
-
-```python
-from flashdet import Trainer
-from flashdet.engine.callbacks import EarlyStopping, CSVLogger, TensorBoardCallback
-
-trainer = Trainer(model_size="m", train_images="data/train", val_images="data/val")
-
-trainer.add_callback(EarlyStopping(patience=20, metric="val_mAP"))
-trainer.add_callback(CSVLogger("metrics.csv"))
-trainer.add_callback(TensorBoardCallback("runs/exp1"))
-
-trainer.train()
-```
-
-Built-in callbacks: `EarlyStopping`, `CSVLogger`, `TensorBoardCallback`, `LRSchedulerCallback`.
 
 ---
 
@@ -373,7 +487,8 @@ Built-in callbacks: `EarlyStopping`, `CSVLogger`, `TensorBoardCallback`, `LRSche
 docker build -t flashdet -f docker/Dockerfile .
 
 # Run inference
-docker run --gpus all -v $(pwd)/data:/app/data flashdet predict --model best.pth --source data/test.jpg
+docker run --gpus all -v $(pwd)/data:/app/data flashdet \
+  predict --model best.pth --source data/test.jpg
 
 # Or use docker-compose
 cd docker && docker compose up
@@ -384,21 +499,42 @@ cd docker && docker compose up
 ## Supported Formats
 
 | Import | Export |
-|--------|--------|
+|---|---|
 | COCO JSON | ONNX |
 | YOLO TXT | FP16 weights |
 | Pascal VOC XML | TorchScript |
 
 ---
 
+## Documentation
+
+Full documentation is in the [`docs/`](docs/) folder:
+
+| Document | Description |
+|---|---|
+| [Home](docs/Home.md) | Overview and getting started |
+| [Installation](docs/Installation.md) | Detailed installation guide |
+| [Quick-Start](docs/Quick-Start.md) | Quick examples for training and inference |
+| [Training](docs/Training.md) | All training methods and hyperparameters |
+| [Models](docs/Models.md) | Architecture details and model zoo |
+| [LoRA Fine-Tuning](docs/LoRA-Fine-Tuning.md) | LoRA/QLoRA variants and usage |
+| [Solutions](docs/Solutions.md) | Vision solutions reference |
+| [Trackers](docs/Trackers.md) | Multi-object tracking guide |
+| [FAQ](docs/FAQ.md) | Frequently asked questions |
+| [Contributing](docs/CONTRIBUTING.md) | How to contribute |
+| [Changelog](docs/CHANGELOG.md) | Version history |
+
+---
+
 ## Contributing
 
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+We welcome contributions! See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for guidelines on adding new architectures, training methods, loss functions, layers, and solutions.
 
 ```bash
 git clone https://github.com/FlashVision/FlashDet.git
 cd FlashDet
 pip install -e ".[dev,all]"
+pytest tests/
 ruff check flashdet/
 flashdet check
 ```
