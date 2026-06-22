@@ -155,9 +155,14 @@ class SSLTrainer:
     def _build_backbone(self) -> nn.Module:
         """Build the backbone network to pretrain."""
         from flashdet.registry import BACKBONES
-        cls = BACKBONES.get(self.backbone_name)
-        if cls is not None:
-            return cls()
+        name = self.backbone_name
+
+        if name in BACKBONES:
+            return BACKBONES.get(name)()
+
+        for registered_name in BACKBONES.list():
+            if registered_name.lower() == name.lower():
+                return BACKBONES.get(registered_name)()
 
         from flashdet.models.backbone.shufflenet import ShuffleNetV2
         return ShuffleNetV2(model_size=self.backbone_size)

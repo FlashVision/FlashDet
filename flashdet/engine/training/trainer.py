@@ -622,7 +622,8 @@ class Trainer:
                     continue
                 if key not in sub_meters:
                     sub_meters[key] = AverageMeter(key)
-                sub_meters[key].update(val.item())
+                v = val.item() if hasattr(val, "item") else float(val)
+                sub_meters[key].update(v)
             self.callbacks.fire("on_batch_end", self, batch_idx, output["loss"].item())
 
             if (batch_idx + 1) % 10 == 0:
@@ -659,7 +660,8 @@ class Trainer:
                     continue
                 if key not in sub_meters:
                     sub_meters[key] = AverageMeter(key)
-                sub_meters[key].update(val.item())
+                v = val.item() if hasattr(val, "item") else float(val)
+                sub_meters[key].update(v)
 
             results = eval_model.predict(images, None, score_thr=0.05, nms_thr=0.6)
             for i, (dets, lbs) in enumerate(results):
