@@ -17,7 +17,7 @@ import time
 import traceback
 import sys
 
-DEVICE = "cpu"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMG_SIZE = 320
 STEPS = 300
 LR = 1e-3
@@ -53,9 +53,14 @@ for img_info in ann["images"]:
     gt_bboxes_list.append(torch.from_numpy(boxes).float())
     gt_labels_list.append(torch.from_numpy(labels).long())
 
-x = torch.stack(images_t)
+x = torch.stack(images_t).to(DEVICE)
+gt_bboxes_list = [b.to(DEVICE) for b in gt_bboxes_list]
+gt_labels_list = [l.to(DEVICE) for l in gt_labels_list]
 total_gt = sum(len(l) for l in gt_labels_list)
 print(f"Dataset: {len(images_t)} images, {total_gt} GT objects, {num_classes} classes")
+print(f"Device: {DEVICE}")
+if DEVICE == "cuda":
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
 print("=" * 80)
 
 
@@ -72,8 +77,8 @@ def compute_map_safe(model, is_grounding_dino=False):
         from flashdet.utils.metrics import compute_map
         if is_grounding_dino:
             B = x.shape[0]
-            input_ids = torch.randint(1, 100, (B, 10))
-            attn_mask = torch.ones(B, 10, dtype=torch.long)
+            input_ids = torch.randint(1, 100, (B, 10), device=DEVICE)
+            attn_mask = torch.ones(B, 10, dtype=torch.long, device=DEVICE)
             preds = model.predict(x, input_ids=input_ids, attention_mask=attn_mask,
                                   score_thr=0.01, nms_thr=0.6)
         else:
@@ -97,8 +102,8 @@ def compute_map_safe(model, is_grounding_dino=False):
                                   "scores": np.zeros(0, np.float32),
                                   "labels": np.zeros(0, np.int64)})
             all_gts.append({
-                "boxes": gt_bboxes_list[i].numpy(),
-                "labels": gt_labels_list[i].numpy(),
+                "boxes": gt_bboxes_list[i].cpu().numpy(),
+                "labels": gt_labels_list[i].cpu().numpy(),
             })
         m = compute_map(all_preds, all_gts, iou_threshold=0.5, num_classes=num_classes)
         return m["mAP"]
@@ -122,8 +127,8 @@ def overfit_test(model_name, model, steps=STEPS, lr=LR, is_grounding_dino=False,
         try:
             if is_grounding_dino:
                 B = x.shape[0]
-                input_ids = torch.randint(1, 100, (B, 10))
-                attn_mask = torch.ones(B, 10, dtype=torch.long)
+                input_ids = torch.randint(1, 100, (B, 10), device=DEVICE)
+                attn_mask = torch.ones(B, 10, dtype=torch.long, device=DEVICE)
                 out = model(x, input_ids=input_ids, attention_mask=attn_mask, gt_meta=gt_meta)
             elif epoch_arg is not None:
                 out = model(x, gt_meta=gt_meta, compute_loss=True, epoch=epoch_arg)
@@ -167,7 +172,7 @@ results = []
 print("\n[1/7] FlashDet...", flush=True)
 try:
     from flashdet.models import FlashDet
-    model = FlashDet(num_classes=num_classes, size="n", total_epochs=STEPS)
+    model = FlashDet(num_classes=num_classes, size="n", total_epochs=STEPS).to(DEVICE)
     name, losses, map50, status, t = overfit_test(
         "FlashDet", model, epoch_arg=1,
     )
@@ -185,8 +190,8 @@ try:
     from flashdet.models.architectures.detr import DETR
     model = DETR(num_classes=num_classes, num_queries=50, d_model=128, nhead=4,
                  num_encoder_layers=2, num_decoder_layers=2, dim_feedforward=256,
-                 pretrained_backbone=False)
-    name, losses, map50, status, t = overfit_test("DETR", model)
+                 pretrained_backbone=False).to(DEVICE)
+    name, losses, map50, status, t = overfit_test("DETR", model, steps=600)
     l0, lf = (losses[0] if losses else 0), (losses[-1] if losses else 0)
     print(f"  loss: {l0:.3f} -> {lf:.3f} | mAP@0.5={map50:.4f} | {status} | {t:.1f}s")
     results.append(("DETR", l0, lf, map50, status))
@@ -201,8 +206,8 @@ try:
     from flashdet.models.architectures.rt_detr import RTDETR
     model = RTDETR(num_classes=num_classes, hidden_dim=128, nhead=4,
                    num_encoder_layers=1, num_decoder_layers=2, dim_feedforward=256,
-                   num_queries=50, pretrained_backbone=False)
-    name, losses, map50, status, t = overfit_test("RT-DETR", model)
+                   num_queries=50, pretrained_backbone=False).to(DEVICE)
+    name, losses, map50, status, t = overfit_test("RT-DETR", model, steps=600, lr=2e-3)
     l0, lf = (losses[0] if losses else 0), (losses[-1] if losses else 0)
     print(f"  loss: {l0:.3f} -> {lf:.3f} | mAP@0.5={map50:.4f} | {status} | {t:.1f}s")
     results.append(("RT-DETR", l0, lf, map50, status))
@@ -215,7 +220,7 @@ except Exception as e:
 print("\n[4/7] YOLOv9...", flush=True)
 try:
     from flashdet.models.architectures.yolov9 import YOLOv9
-    model = YOLOv9(num_classes=num_classes, width_mult=0.25, depth_mult=0.33)
+    model = YOLOv9(num_classes=num_classes, width_mult=0.25, depth_mult=0.33).to(DEVICE)
     name, losses, map50, status, t = overfit_test("YOLOv9", model)
     l0, lf = (losses[0] if losses else 0), (losses[-1] if losses else 0)
     print(f"  loss: {l0:.3f} -> {lf:.3f} | mAP@0.5={map50:.4f} | {status} | {t:.1f}s")
@@ -229,7 +234,7 @@ except Exception as e:
 print("\n[5/7] YOLOv10...", flush=True)
 try:
     from flashdet.models.architectures.yolov10 import YOLOv10
-    model = YOLOv10(num_classes=num_classes, width_mult=0.25, depth_mult=0.33)
+    model = YOLOv10(num_classes=num_classes, width_mult=0.25, depth_mult=0.33).to(DEVICE)
     name, losses, map50, status, t = overfit_test("YOLOv10", model)
     l0, lf = (losses[0] if losses else 0), (losses[-1] if losses else 0)
     print(f"  loss: {l0:.3f} -> {lf:.3f} | mAP@0.5={map50:.4f} | {status} | {t:.1f}s")
@@ -243,7 +248,7 @@ except Exception as e:
 print("\n[6/7] YOLOv11...", flush=True)
 try:
     from flashdet.models.architectures.yolov11 import YOLOv11
-    model = YOLOv11(num_classes=num_classes, width_mult=0.25, depth_mult=0.33)
+    model = YOLOv11(num_classes=num_classes, width_mult=0.25, depth_mult=0.33).to(DEVICE)
     name, losses, map50, status, t = overfit_test("YOLOv11", model)
     l0, lf = (losses[0] if losses else 0), (losses[-1] if losses else 0)
     print(f"  loss: {l0:.3f} -> {lf:.3f} | mAP@0.5={map50:.4f} | {status} | {t:.1f}s")
@@ -259,9 +264,9 @@ try:
     from flashdet.models.architectures.grounding_dino import GroundingDINO
     model = GroundingDINO(num_queries=50, d_model=128, nhead=4,
                           num_encoder_layers=1, num_decoder_layers=2,
-                          pretrained_backbone=False, text_encoder_depth=1)
+                          pretrained_backbone=False, text_encoder_depth=1).to(DEVICE)
     name, losses, map50, status, t = overfit_test(
-        "Grounding-DINO", model, is_grounding_dino=True,
+        "Grounding-DINO", model, steps=600, is_grounding_dino=True,
     )
     l0, lf = (losses[0] if losses else 0), (losses[-1] if losses else 0)
     drop = (l0 - lf) / max(abs(l0), 1e-8) * 100
