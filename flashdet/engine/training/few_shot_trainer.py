@@ -9,10 +9,10 @@ Usage::
     from flashdet.engine import FewShotTrainer
 
     trainer = FewShotTrainer(
-        base_checkpoint="workspace/base/model_best_inference.pth",
+        base_checkpoint="path/to/base_model.pth",
         n_shot=5,
         novel_class_file="novel_classes.txt",
-        train_images="data/novel/train",
+        train_images="path/to/novel/train",
     )
     trainer.train()
 """

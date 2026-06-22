@@ -71,11 +71,8 @@ quantized_models/
 # ═══════════════════════════════════════════════════════════════
 # Datasets (large — only data/demo/ is tracked for quick tests)
 # ═══════════════════════════════════════════════════════════════
-data/raw/
-data/coco/
-data/tiny_test/
-data/container_num/
-data/my_dataset/
+data/*
+!data/demo/
 
 # ═══════════════════════════════════════════════════════════════
 # Logs

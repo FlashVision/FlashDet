@@ -1,8 +1,8 @@
 # FAQ
 
-## How fast is FlashDet?
+## What is FlashDet?
 
-FlashDet-m achieves 100+ FPS on GPU and 30+ FPS on edge devices with only 1.17M parameters.
+FlashDet is a YOLO26-based lightweight object detection framework supporting multiple architectures (FlashDet, DETR, RT-DETR, YOLOv9, YOLOv10, YOLOv11, GroundingDINO) with pluggable components via a registry system.
 
 ## What datasets are supported?
 
@@ -10,15 +10,21 @@ COCO JSON, YOLO TXT, and Pascal VOC XML formats for import.
 
 ## Can I use my own backbone?
 
-Yes, use the registry system to register custom backbones:
+Yes, use the registry system:
 
 ```python
 from flashdet.registry import BACKBONES
 
-@BACKBONES.register("my_backbone")
+@BACKBONES.register("MyBackbone")
 class MyBackbone(nn.Module):
     ...
 ```
+
+## How to add a new architecture?
+
+1. Create `flashdet/models/architectures/my_model.py`
+2. Register it: `@DETECTORS.register("MyModel")`
+3. Add to `flashdet/models/architectures/__init__.py`
 
 ## How to export for mobile?
 
@@ -28,9 +34,13 @@ flashdet export --model best.pth --output model.onnx --simplify
 
 Then convert ONNX to TFLite, CoreML, or NCNN as needed.
 
-## What's the difference between LoRA variants?
+## What training methods are available?
 
-- **standard**: Classic low-rank adapters
-- **dora**: Better generalization via weight decomposition
-- **adalora**: Automatically adjusts rank per layer
-- **lora_plus**: Different LR for A and B matrices
+| Method | Class | Use case |
+|--------|-------|----------|
+| Standard | `Trainer` | Full supervision |
+| Knowledge Distillation | `KDTrainer` | Model compression |
+| Self-Supervised | `SSLTrainer` | Backbone pretraining |
+| Semi-Supervised | `SemiSupervisedTrainer` | Limited labels |
+| Few-Shot | `FewShotTrainer` | Very few examples |
+| Active Learning | `ActiveLearningTrainer` | Annotation budget |

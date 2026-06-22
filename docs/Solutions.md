@@ -1,5 +1,7 @@
 # Solutions
 
+High-level vision solutions built on FlashDet detection + tracking.
+
 ## Object Counter
 
 Count objects crossing lines or entering regions:
@@ -41,3 +43,6 @@ overlay = heatmap.process_frame(frame)
 | DistanceCalculator | Measure distances |
 | ParkingManager | Track parking occupancy |
 | SecurityAlarm | Intrusion alerts |
+| WorkoutMonitor | Exercise rep counting |
+| LiveInference | Real-time camera inference |
+| AnalyticsDashboard | Aggregate detection analytics |

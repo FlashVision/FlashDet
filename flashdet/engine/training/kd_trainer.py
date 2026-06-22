@@ -8,9 +8,9 @@ Usage::
     from flashdet.engine import KDTrainer
 
     trainer = KDTrainer(
-        teacher_checkpoint="workspace/teacher/model_best_inference.pth",
-        teacher_size="m-1.5x",
-        model_size="m-0.5x",
+        teacher_checkpoint="path/to/teacher.pth",
+        teacher_size="l",
+        model_size="n",
         kd_temperature=4.0,
         kd_alpha=0.5,
     )

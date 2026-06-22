@@ -1,17 +1,14 @@
-# FlashDet Wiki
+# FlashDet Documentation
 
 Welcome to the FlashDet documentation.
 
 ## Contents
 
-- [Installation](Installation)
-- [Quick Start](Quick-Start)
-- [CLI Reference](CLI-Reference)
-- [Python API](Python-API)
-- [Models](Models)
-- [Training](Training)
-- [LoRA Fine-Tuning](LoRA-Fine-Tuning)
-- [Trackers](Trackers)
-- [Solutions](Solutions)
-- [ONNX Export](ONNX-Export)
-- [FAQ](FAQ)
+- [Installation](Installation.md)
+- [Quick Start](Quick-Start.md)
+- [Models](Models.md)
+- [Training](Training.md)
+- [LoRA Fine-Tuning](LoRA-Fine-Tuning.md)
+- [Trackers](Trackers.md)
+- [Solutions](Solutions.md)
+- [FAQ](FAQ.md)

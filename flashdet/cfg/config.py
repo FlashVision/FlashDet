@@ -1,9 +1,9 @@
 """
 Configuration for FlashDet Model.
 
-Default class names are set for the bundled indoor-objects dataset
-(10 classes).  train.py reads them automatically from the annotation
-JSON, so this is only a fallback.
+All paths and class counts are left empty/generic by default so nothing
+is hardcoded to a specific dataset.  ``train.py`` reads them from the
+annotation JSON automatically — these are just fallbacks.
 """
 
 from dataclasses import dataclass, field
@@ -14,16 +14,15 @@ from typing import List, Optional, Tuple
 class DataConfig:
     """Dataset paths — point to your COCO-format data directory.
 
-    Defaults use the bundled indoor dataset (data/indoor/).
     Override with your own paths or download a dataset via:
         flashdet download --dataset coco2017
     """
-    train_images: str = "data/indoor/train"
-    train_annotations: str = "data/indoor/train/_annotations.coco.json"
-    val_images: str = "data/indoor/valid"
-    val_annotations: str = "data/indoor/valid/_annotations.coco.json"
-    test_images: str = "data/indoor/test"
-    test_annotations: str = "data/indoor/test/_annotations.coco.json"
+    train_images: str = ""
+    train_annotations: str = ""
+    val_images: str = ""
+    val_annotations: str = ""
+    test_images: str = ""
+    test_annotations: str = ""
     num_workers: int = 4
 
 
@@ -40,7 +39,7 @@ class ModelConfig:
     """
     name: str = "FlashDet"
     architecture: str = "flashdet"
-    num_classes: int = 10
+    num_classes: int = 80
     input_size: Tuple[int, int] = (320, 320)
     
     # Backbone: 1.0x for FlashDet-m, 1.5x for m-1.5x, 0.5x for m-0.5x
@@ -141,7 +140,7 @@ class Config:
     train: TrainConfig = field(default_factory=TrainConfig)
     augment: AugmentConfig = field(default_factory=AugmentConfig)
 
-    class_names: List[str] = field(default_factory=lambda: ["door", "cabinetDoor", "refrigeratorDoor", "window", "chair", "table", "cabinet", "couch", "openedDoor", "pole"])
+    class_names: List[str] = field(default_factory=list)
 
 
 MODEL_SIZE_MAP = {
@@ -164,7 +163,7 @@ YOLO26_SIZE_MAP = {
 def get_config(
     model_size: str = "n",
     input_size: int = 320,
-    num_classes: int = 10,
+    num_classes: int = 80,
     **overrides,
 ) -> Config:
     """Return configuration for a given model size.
@@ -207,10 +206,10 @@ def load_yaml_config(yaml_path: str) -> Config:
     YAML structure mirrors the Config dataclass hierarchy:
         model:
           backbone_size: "1.0x"
-          num_classes: 80
+          num_classes: 10
           input_size: [320, 320]
         data:
-          train_images: data/train
+          train_images: data/my_dataset/train
         train:
           epochs: 100
     """
