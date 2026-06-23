@@ -78,12 +78,18 @@ class STALAssigner:
     smallest stride, it is temporarily expanded to s_ref so more
     anchors fall inside and can be scored by TAL.
 
+    When ``one_to_one=True`` (used by the o2o head), a greedy bipartite
+    matching step ensures each GT is matched to exactly one anchor and
+    each anchor matches at most one GT — the prerequisite for NMS-free
+    inference.
+
     Args:
         topk: Number of candidates per GT for one-to-many assignment.
         alpha: Classification alignment exponent.
         beta: IoU alignment exponent.
         strides: Feature pyramid strides (e.g. [8, 16, 32]).
         s_ref: Reference size for STAL expansion. Defaults to strides[1].
+        one_to_one: Enforce 1:1 GT-to-anchor matching (for o2o head).
         eps: Numerical stability constant.
     """
 
@@ -94,6 +100,7 @@ class STALAssigner:
         beta: float = 6.0,
         strides: Tuple[int, ...] = (8, 16, 32),
         s_ref: Optional[int] = None,
+        one_to_one: bool = False,
         eps: float = 1e-9,
     ):
         self.topk = topk
@@ -102,6 +109,7 @@ class STALAssigner:
         self.strides = strides
         self.s_min = strides[0]
         self.s_ref = s_ref if s_ref is not None else (strides[1] if len(strides) > 1 else strides[0] * 2)
+        self.one_to_one = one_to_one
         self.eps = eps
 
     @torch.no_grad()
@@ -194,6 +202,24 @@ class STALAssigner:
             matching_matrix[multi_match] = 0
             matching_matrix[multi_match, max_gt] = 1.0
 
+        # One-to-one: each GT gets exactly one anchor (greedy by alignment)
+        if self.one_to_one:
+            new_matrix = torch.zeros_like(matching_matrix)
+            used_anchors = torch.zeros(n_anchors, dtype=torch.bool, device=device)
+            best_vals, _ = matching_matrix.max(dim=0)
+            gt_order = best_vals.argsort(descending=True)
+            for g in gt_order:
+                g = g.item()
+                if best_vals[g] <= 0:
+                    break
+                col = matching_matrix[:, g].clone()
+                col[used_anchors] = 0
+                a = col.argmax().item()
+                if col[a] > 0:
+                    new_matrix[a, g] = matching_matrix[a, g]
+                    used_anchors[a] = True
+            matching_matrix = new_matrix
+
         # --- Final assignment ---
         fg_mask = (matching_matrix > 0).any(dim=1)  # [N]
         if fg_mask.sum() == 0:
@@ -203,17 +229,34 @@ class STALAssigner:
         assigned_labels[fg_mask] = gt_labels[matched_gt_idx]
         assigned_bboxes[fg_mask] = gt_bboxes[matched_gt_idx]
 
-        # Soft label: alignment-normalized class target
-        pos_alignment = matching_matrix[fg_mask].max(dim=1).values  # [n_pos]
-        pos_iou = pair_iou[fg_mask, matched_gt_idx]  # [n_pos]
-
-        # Normalize alignment per GT to [0, iou]
-        norm_align = pos_alignment
-        max_align_per_gt = matching_matrix.max(dim=0).values  # [M]
-        gt_max = max_align_per_gt[matched_gt_idx].clamp(min=self.eps)
-        norm_align = pos_alignment / gt_max * pos_iou
-
         pos_labels_onehot = F.one_hot(gt_labels[matched_gt_idx], num_classes).float()
+
+        # Soft labels for both heads — matches Ultralytics TaskAlignedAssigner
+        # target_scores = one_hot * norm_align_metric
+        # where norm_align_metric = (alignment * max_overlap_per_gt) / (max_alignment_per_gt + eps)
+        pos_alignment = matching_matrix[fg_mask].max(dim=1).values
+        pos_iou = pair_iou[fg_mask, matched_gt_idx]
+        max_align_per_gt = matching_matrix.max(dim=0).values
+        gt_max = max_align_per_gt[matched_gt_idx].clamp(min=self.eps)
+        norm_align = (pos_alignment / gt_max * pos_iou).clamp(min=0.05)
         assigned_scores[fg_mask] = pos_labels_onehot * norm_align[:, None]
+
+        # #region agent log
+        import os as _os4, json as _json4, time as _time4
+        _lp4 = _os4.path.join(_os4.path.dirname(_os4.path.dirname(_os4.path.dirname(_os4.path.abspath(__file__)))), "debug-387c01.log")
+        if not hasattr(self, '_dbg_assign_logged'):
+            self._dbg_assign_logged = True
+            n_pos = fg_mask.sum().item()
+            try:
+                _data = {"branch":"o2o" if self.one_to_one else "o2m","n_gt":n_gt,"n_pos":n_pos,"score_sum":round(assigned_scores.sum().item(),4),"norm_align_mean":round(norm_align.mean().item(),4) if n_pos>0 else 0,"iou_mean":round(pos_iou.mean().item(),4) if n_pos>0 else 0}
+                if n_pos > 0:
+                    _sc = assigned_scores[fg_mask].sum(-1)
+                    _data["score_mean"] = round(_sc.mean().item(),4)
+                    _data["score_min"] = round(_sc.min().item(),4)
+                    _data["score_max"] = round(_sc.max().item(),4)
+                with open(_lp4, "a") as _f4:
+                    _f4.write(_json4.dumps({"sessionId":"387c01","hypothesisId":"H","location":"stal.py:assign","message":"label_assignment_postfix","data":_data,"timestamp":int(_time4.time()*1000)}) + "\n")
+            except: pass
+        # #endregion
 
         return assigned_labels, assigned_bboxes, assigned_scores, fg_mask

@@ -4,7 +4,7 @@ DataLoader utilities for FlashDet detection.
 
 import random
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from typing import Optional, Tuple
 
 from .dataset import FlashDetDataset, collate_fn
@@ -23,6 +23,7 @@ def create_dataloader(
     mosaic: bool = False,
     mixup: bool = False,
     copy_paste: bool = False,
+    distributed: bool = False,
 ) -> DataLoader:
     """
     Create a DataLoader for FlashDet detection.
@@ -75,15 +76,25 @@ def create_dataloader(
             )
             effective_workers = 0
 
-    dataloader = DataLoader(
-        dataset,
+    sampler = None
+    if distributed:
+        sampler = DistributedSampler(dataset, shuffle=shuffle)
+        shuffle = False  # sampler handles shuffling
+
+    loader_kwargs = dict(
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=shuffle if sampler is None else False,
         num_workers=effective_workers,
         pin_memory=pin and effective_workers > 0,
         collate_fn=collate_fn,
         drop_last=is_train,
+        sampler=sampler,
     )
+    if effective_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = 4
+
+    dataloader = DataLoader(dataset, **loader_kwargs)
 
     return dataloader
 
@@ -134,6 +145,7 @@ def create_train_val_loaders(
     mosaic: bool = False,
     mixup: bool = False,
     copy_paste: bool = False,
+    distributed: bool = False,
 ) -> Tuple[DataLoader, DataLoader]:
     """Create training and validation DataLoaders."""
     train_loader = create_dataloader(
@@ -146,6 +158,7 @@ def create_train_val_loaders(
         mosaic=mosaic,
         mixup=mixup,
         copy_paste=copy_paste,
+        distributed=distributed,
     )
 
     val_loader = create_dataloader(
@@ -155,6 +168,7 @@ def create_train_val_loaders(
         input_size=input_size,
         num_workers=num_workers,
         is_train=False,
+        distributed=distributed,
     )
 
     return train_loader, val_loader
