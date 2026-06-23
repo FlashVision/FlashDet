@@ -151,9 +151,16 @@ class _PicoDetHead(nn.Module):
         )
         self.cls_pred = nn.Conv2d(in_channels, num_classes, 1)
         self.reg_pred = nn.Conv2d(in_channels, 4, 1)
+        # Learnable gates start at 0 so residual is off initially,
+        # preserving the focal-loss bias prior (-4.595). Gates learn
+        # to open during training, gradually adding the skip path.
+        self.cls_gate = nn.Parameter(torch.zeros(1))
+        self.reg_gate = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
-        return self.cls_pred(self.cls_convs(x)), self.reg_pred(self.reg_convs(x))
+        cls_feat = self.cls_convs(x) + self.cls_gate * x
+        reg_feat = self.reg_convs(x) + self.reg_gate * x
+        return self.cls_pred(cls_feat), self.reg_pred(reg_feat)
 
 
 class _PicoDualHead(nn.Module):
@@ -250,29 +257,42 @@ class FlashDetPico(nn.Module):
         self.loss_fn = E2EDetectionLoss(
             num_classes=num_classes,
             strides=strides,
-            alpha_init=kwargs.get("prog_alpha_init", 1.0),
-            alpha_final=kwargs.get("prog_alpha_final", 0.0),
+            alpha_init=kwargs.get("prog_alpha_init", 0.8),
+            alpha_final=kwargs.get("prog_alpha_final", 0.1),
             o2m_topk=kwargs.get("o2m_topk", 10),
             o2o_topk=kwargs.get("o2o_topk", 7),
             box_weight=kwargs.get("box_weight", 7.5),
-            cls_weight=kwargs.get("cls_weight", 1.0),
-            l1_weight=kwargs.get("l1_weight", 0.5),
+            cls_weight=kwargs.get("cls_weight", 0.5),
+            l1_weight=kwargs.get("l1_weight", 1.5),
         )
 
         self._init_weights()
 
+        # Log backbone pretrained status
+        bb_loaded = getattr(self.backbone, "pretrained_loaded", False)
+        logger.info(
+            "FlashDetPico backbone: %s",
+            "ImageNet pretrained" if bb_loaded else "RANDOM init (pretrained failed)",
+        )
+
     def _init_weights(self):
-        for m in self.head.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-                if m.bias is not None:
+        """Kaiming-normal init for neck + head; backbone keeps pretrained weights."""
+        for module in (self.neck, self.head):
+            for m in module.modules():
+                if isinstance(m, nn.Conv2d):
+                    nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                    nn.init.ones_(m.weight)
                     nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
+        # Focal-loss prior bias for classification heads (prior=0.01)
         for heads in [self.head.o2o_heads, self.head.o2m_heads]:
             for h in heads:
                 nn.init.constant_(h.cls_pred.bias, -4.595)
+                # Regression head: small init for stable early predictions
+                nn.init.normal_(h.reg_pred.weight, std=0.001)
+                nn.init.zeros_(h.reg_pred.bias)
 
     def forward(self, x, gt_meta=None, epoch=0, compute_loss=False, return_features=False, **kwargs):
         features = self.backbone(x)
@@ -299,12 +319,16 @@ class FlashDetPico(nn.Module):
                 epoch=epoch, total_epochs=self.total_epochs,
             )
             result["loss"] = loss
-            result["loss_states"] = loss_states
+            # Store loss_states on the module so DataParallel doesn't
+            # try to gather non-tensor values (prog_alpha is a float,
+            # feat_sizes is a list of tuples).
+            self._last_loss_states = loss_states
 
-        result["preds"] = head_out["o2o_cls"]
-        result["o2o_cls"] = head_out["o2o_cls"]
-        result["o2o_reg"] = head_out["o2o_reg"]
-        result["feat_sizes"] = head_out["feat_sizes"]
+        if not self.training:
+            result["preds"] = head_out["o2o_cls"]
+            result["o2o_cls"] = head_out["o2o_cls"]
+            result["o2o_reg"] = head_out["o2o_reg"]
+            result["feat_sizes"] = head_out["feat_sizes"]
         return result
 
     # ------ Anchor grid cache (avoids recompute per call) ------
@@ -322,11 +346,7 @@ class FlashDetPico(nn.Module):
 
     @torch.no_grad()
     def predict(self, x, img_metas=None, score_thr=0.25, max_det=300, **kwargs):
-        """NMS-free inference — score threshold + top-k only.
-
-        The o2o head produces 1:1 predictions (one per object), so NMS
-        is unnecessary. This is significantly faster on CPU.
-        """
+        """NMS-free inference — score threshold + top-k only."""
         self.eval()
         out = self.forward(x)
         anchor_centers, anchor_strides = self._get_anchors(
@@ -340,11 +360,7 @@ class FlashDetPico(nn.Module):
         )
 
     def strip_o2m(self):
-        """Remove one-to-many heads and loss for lean CPU/edge deployment.
-
-        After calling this the model cannot be trained, but inference is
-        faster and the checkpoint is smaller.
-        """
+        """Remove one-to-many heads and loss for lean CPU/edge deployment."""
         del self.head.o2m_heads
         del self.loss_fn
         self.head.o2m_heads = None  # type: ignore[assignment]
@@ -412,8 +428,8 @@ class FlashDet(nn.Module):
         o2m_topk: int = 10,
         o2o_topk: int = 7,
         box_weight: float = 7.5,
-        cls_weight: float = 1.0,
-        l1_weight: float = 0.5,
+        cls_weight: float = 0.5,
+        l1_weight: float = 1.5,
     ):
         if size == "p":
             return
@@ -455,16 +471,21 @@ class FlashDet(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
+        """Kaiming-normal init for all conv layers + proper BN/bias priors."""
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, nn.BatchNorm2d):
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
-        # Initialize cls bias for low initial false-positive rate
+        # Focal-loss prior bias for classification heads (prior=0.01)
         for heads in [self.head.o2o_heads, self.head.o2m_heads]:
             for h in heads:
                 nn.init.constant_(h.cls_pred.bias, -4.595)
+                nn.init.normal_(h.reg_pred.weight, std=0.001)
+                nn.init.zeros_(h.reg_pred.bias)
 
     def forward(
         self,
@@ -519,12 +540,12 @@ class FlashDet(nn.Module):
             )
 
             result["loss"] = loss
-            result["loss_states"] = loss_states
-            result["preds"] = head_out["o2o_cls"]  # for compatibility
-            result["o2o_cls"] = head_out["o2o_cls"]
-            result["o2o_reg"] = head_out["o2o_reg"]
-            result["feat_sizes"] = head_out["feat_sizes"]
-        else:
+            # Store loss_states on the module so DataParallel doesn't
+            # try to gather non-tensor values (prog_alpha is a float,
+            # feat_sizes is a list of tuples).
+            self._last_loss_states = loss_states
+
+        if not self.training:
             result["preds"] = head_out["o2o_cls"]
             result["o2o_cls"] = head_out["o2o_cls"]
             result["o2o_reg"] = head_out["o2o_reg"]

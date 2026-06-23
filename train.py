@@ -15,11 +15,14 @@ import argparse
 import time
 import json
 import math
+import random
 import cv2
 import numpy as np
 
 import copy
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from flashdet.cfg import get_config
 from flashdet.models import FlashDet, load_coco_pretrained
@@ -38,6 +41,26 @@ from flashdet.engine.core.musgd import build_musgd
 
 from flashdet.engine.core.ema import ModelEMA
 from flashdet.analytics.plots import plot_training_curves
+
+
+def _is_main_process():
+    """Return True if this is rank 0 or non-distributed."""
+    return not dist.is_initialized() or dist.get_rank() == 0
+
+
+def _setup_ddp():
+    """Initialize DDP from environment variables set by torchrun."""
+    if "RANK" not in os.environ:
+        return False
+    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    return True
+
+
+def _cleanup_ddp():
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def _make_color_palette(n: int):
@@ -75,7 +98,7 @@ def save_visualization(model, images, gt_meta, save_path, epoch, batch_idx, devi
     pred_model.eval()
     try:
         with torch.no_grad():
-            results = pred_model.predict(images, None, score_thr=0.3, nms_thr=0.5)
+            results = pred_model.predict(images, None, score_thr=0.3)
     except Exception:
         results = []
     pred_model.train()
@@ -274,21 +297,43 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
     zero_pos_batches = 0
     total_batches = 0
 
+    # Multi-scale training: randomly vary input size every 10 batches
+    # for scale-invariant learning (256-416 in steps of 32)
+    multi_scale_sizes = [256, 288, 320, 352, 384, 416]
+    current_ms_size = None
+
     for batch_idx, (images, gt_meta) in enumerate(dataloader):
         images = images.to(device)
 
+        # Multi-scale resize every 10 batches
+        if batch_idx % 10 == 0:
+            current_ms_size = random.choice(multi_scale_sizes)
+        if current_ms_size is not None and current_ms_size != images.shape[-1]:
+            images = torch.nn.functional.interpolate(
+                images, size=(current_ms_size, current_ms_size),
+                mode="bilinear", align_corners=False,
+            )
+            scale = current_ms_size / 320.0
+            for i in range(len(gt_meta["gt_bboxes"])):
+                if len(gt_meta["gt_bboxes"][i]) > 0:
+                    gt_meta["gt_bboxes"][i] = gt_meta["gt_bboxes"][i] * scale
+
         with torch.amp.autocast(device.type, enabled=use_amp):
             output = model(images, gt_meta, epoch=epoch)
-            loss = output["loss"] / grad_accum
+            loss = output["loss"]
+            if loss.dim() > 0:
+                loss = loss.mean()
+            loss = loss / grad_accum
 
-        loss_states = output.get("loss_states", {})
+        # loss_states stored on the unwrapped model to avoid DataParallel gather issues
+        loss_states = getattr(raw_model, "_last_loss_states", output.get("loss_states", {}))
         total_batches += 1
         num_pos = loss_states.get("o2m_pos", loss_states.get("num_pos"))
         num_pos_val = num_pos.item() if hasattr(num_pos, "item") else (num_pos or 0)
         if num_pos_val == 0:
             zero_pos_batches += 1
 
-        if torch.isnan(loss):
+        if torch.isnan(loss).any():
             logger.warning(f"NaN loss at batch {batch_idx}, skipping")
             continue
 
@@ -311,7 +356,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
             if ema is not None:
                 ema.update(raw_model)
         
-        loss_meter.update(output["loss"].item())
+        raw_loss = output["loss"]
+        loss_meter.update(raw_loss.mean().item() if raw_loss.dim() > 0 else raw_loss.item())
         for key, val in loss_states.items():
             if "pos" in key:
                 continue
@@ -320,9 +366,9 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
             v = val.item() if hasattr(val, "item") else val
             sub_meters[key].update(v)
         
-        # Save visualization every 20 batches, or on the last batch of the epoch
+        # Save visualization every 20 batches, or on the last batch of the epoch (rank 0 only)
         is_last_batch = (batch_idx + 1) == len(dataloader)
-        if vis_dir and ((batch_idx + 1) % 20 == 0 or is_last_batch):
+        if vis_dir and _is_main_process() and ((batch_idx + 1) % 20 == 0 or is_last_batch):
             try:
                 vis_path = os.path.join(vis_dir, f"epoch{epoch}_batch{batch_idx+1}.jpg")
                 save_visualization(model, images, gt_meta, vis_path, epoch, batch_idx + 1, device, config,
@@ -338,8 +384,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
             except Exception as e:
                 logger.warning(f"Failed to save visualization: {e}")
         
-        # Log every 10 batches
-        if (batch_idx + 1) % 10 == 0:
+        # Log every 10 batches (rank 0 only)
+        if (batch_idx + 1) % 10 == 0 and _is_main_process():
             elapsed = time.time() - start_time
             sub_str = ", ".join(f"{k}: {m.avg:.4f}" for k, m in sub_meters.items())
             pos_str = f" Pos: {num_pos_val:.0f}" if num_pos is not None else ""
@@ -393,7 +439,7 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None):
 
         if "loss" in out:
             loss_meter.update(out["loss"].item())
-        loss_states = out.get("loss_states", {})
+        loss_states = getattr(eval_model, "_last_loss_states", out.get("loss_states", {}))
         for key, val in loss_states.items():
             if "pos" in key:
                 continue
@@ -402,7 +448,7 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None):
             v = val.item() if hasattr(val, "item") else val
             sub_meters[key].update(v)
 
-        results = eval_model.predict(images, None, score_thr=0.05, nms_thr=0.6)
+        results = eval_model.predict(images, None, score_thr=0.01)
         for i, (dets, lbs) in enumerate(results):
             gt_boxes  = gt_meta["gt_bboxes"][i]
             gt_labels = gt_meta["gt_labels"][i]
@@ -488,7 +534,7 @@ def main():
     parser.add_argument("--amp", action="store_true",
                         help="Enable Automatic Mixed Precision (FP16) training")
     parser.add_argument("--multi-gpu", action="store_true",
-                        help="Use all visible GPUs via DataParallel")
+                        help="Use all visible GPUs via DDP (launch with torchrun)")
     parser.add_argument("--grad-accum", type=int, default=1,
                         help="Gradient accumulation steps (effective batch = batch_size * grad_accum)")
 
@@ -545,13 +591,22 @@ def main():
     
     model_size = args.model_size
     input_size = (args.input_size, args.input_size)
-    
+
+    # DDP initialization (if launched via torchrun)
+    use_ddp = _setup_ddp()
+    local_rank = int(os.environ.get("LOCAL_RANK", 0)) if use_ddp else 0
+    is_main = _is_main_process()
+
     # Setup
     os.makedirs(args.save_dir, exist_ok=True)
     logger = setup_logger("FlashDet", args.save_dir)
+    if not is_main:
+        import logging as _logging
+        logger.setLevel(_logging.WARNING)
+
     requested_device = args.device
     if torch.cuda.is_available():
-        device = torch.device(requested_device)
+        device = torch.device(f"cuda:{local_rank}") if use_ddp else torch.device(requested_device)
     else:
         device = torch.device("cpu")
         req = str(requested_device).strip().lower()
@@ -621,6 +676,7 @@ def main():
         mosaic=args.mosaic,
         mixup=args.mixup,
         copy_paste=getattr(args, "copy_paste", False),
+        distributed=use_ddp,
     )
 
     val_loader = create_dataloader(
@@ -630,6 +686,7 @@ def main():
         input_size=input_size,
         num_workers=args.workers,
         is_train=False,
+        distributed=use_ddp,
     )
     
     logger.info(f"Train batches: {len(train_loader)}")
@@ -752,16 +809,20 @@ def main():
         logger.info(f"Gradient Accumulation: {grad_accum} steps "
                     f"(effective batch = {args.batch_size * grad_accum})")
 
-    # Multi-GPU via DataParallel (after pretrained loading, before optimizer/EMA)
-    use_multi_gpu = args.multi_gpu and torch.cuda.device_count() > 1
-    if use_multi_gpu:
+    # Multi-GPU via DDP (after pretrained loading, before optimizer/EMA)
+    use_multi_gpu = use_ddp
+    if use_ddp:
+        n_gpus = dist.get_world_size()
+        logger.info(f"Multi-GPU: using {n_gpus} GPUs via DistributedDataParallel")
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    elif args.multi_gpu and torch.cuda.device_count() > 1:
         n_gpus = torch.cuda.device_count()
-        logger.info(f"Multi-GPU: using {n_gpus} GPUs via DataParallel")
+        logger.info(f"Multi-GPU: using {n_gpus} GPUs via DataParallel (use torchrun for DDP)")
         model = torch.nn.DataParallel(model)
+        use_multi_gpu = True
     elif args.multi_gpu:
         logger.info("Multi-GPU requested but only 1 GPU available, using single GPU")
 
-    # raw_model is always the unwrapped model (used for EMA, saving, etc.)
     raw_model = model.module if use_multi_gpu else model
 
     # --- torchtune: Activation Checkpointing ---
@@ -912,6 +973,10 @@ def main():
     os.makedirs(plots_dir, exist_ok=True)
 
     for epoch in range(start_epoch, args.epochs):
+        # Set epoch on distributed sampler for proper shuffling
+        if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
+
         # For optimizer_in_bwd, manually compute and set the LR each epoch
         if args.optimizer_in_bwd:
             lr_factor = lr_lambda(epoch)
@@ -960,7 +1025,8 @@ def main():
 
         # Validate using EMA weights (better accuracy than raw model)
         # val_interval controls how often we run the (relatively expensive) mAP pass.
-        if (epoch + 1) % config.train.val_interval == 0:
+        # Only rank 0 runs validation and saves checkpoints in DDP.
+        if (epoch + 1) % config.train.val_interval == 0 and is_main:
             val_loss, map50, val_sub = validate(
                 raw_model, val_loader, device, logger, ema=ema, class_names=class_names
             )
@@ -1024,33 +1090,42 @@ def main():
                 logger.warning(f"Failed to save training plots: {e}")
 
         # Save latest checkpoint (EMA state included in one atomic write)
-        ckpt_path = os.path.join(args.save_dir, "checkpoint_last.pth")
-        save_checkpoint(
-            raw_model, optimizer, epoch, train_losses["loss"],
-            ckpt_path,
-            scheduler=scheduler,
-            config=model_config,
-            ema=ema,
-        )
+        if is_main:
+            ckpt_path = os.path.join(args.save_dir, "checkpoint_last.pth")
+            save_checkpoint(
+                raw_model, optimizer, epoch, train_losses["loss"],
+                ckpt_path,
+                scheduler=scheduler,
+                config=model_config,
+                ema=ema,
+            )
 
-        save_inference_weights(
-            ema.ema,
-            os.path.join(args.save_dir, "model_last_inference.pth"),
-            config=model_config,
-            half=False
-        )
-        save_inference_weights(
-            ema.ema,
-            os.path.join(args.save_dir, "model_last_fp16.pth"),
-            config=model_config,
-            half=True
-        )
+            save_inference_weights(
+                ema.ema,
+                os.path.join(args.save_dir, "model_last_inference.pth"),
+                config=model_config,
+                half=False
+            )
+            save_inference_weights(
+                ema.ema,
+                os.path.join(args.save_dir, "model_last_fp16.pth"),
+                config=model_config,
+                half=True
+            )
+
+        # Sync all ranks before next epoch
+        if use_ddp:
+            dist.barrier()
 
         # Step scheduler (no-op when optimizer_in_bwd; LR is set manually above)
         if scheduler is not None:
             scheduler.step()
     
-    # Save final inference weights at end of training
+    # Only rank 0 saves final weights
+    if not is_main:
+        _cleanup_ddp()
+        return
+
     logger.info("\nSaving final inference weights...")
 
     # If LoRA/QLoRA was used, save adapter weights separately and merge for inference
@@ -1101,6 +1176,8 @@ def main():
     if tt_flags:
         logger.info(f"torchtune optimizations used: {', '.join(tt_flags)}")
     logger.info("=" * 60)
+
+    _cleanup_ddp()
 
 
 if __name__ == "__main__":
