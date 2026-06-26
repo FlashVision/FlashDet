@@ -54,7 +54,7 @@ def parse_args():
     parser.add_argument("--no-strong-aug", action="store_true",
                         help="Disable strong augmentation on unlabeled data")
     # Training
-    parser.add_argument("--model-size", default="m", help="Model size (n, s, m, l)")
+    parser.add_argument("--model-size", default="m", help="Model size (p, n, s, m, l)")
     parser.add_argument("--architecture", default="flashdet", help="Detector architecture")
     parser.add_argument("--epochs", type=int, default=100, help="Training epochs")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
@@ -64,6 +64,7 @@ def parse_args():
     parser.add_argument("--amp", action="store_true", help="Enable mixed precision")
     parser.add_argument("--save-dir", default="workspace/semi_sup_output", help="Output directory")
     parser.add_argument("--workers", type=int, default=4, help="DataLoader workers")
+    parser.add_argument("--resume", default=None, help="Resume from checkpoint")
     return parser.parse_args()
 
 
@@ -90,6 +91,7 @@ def main():
         amp=args.amp,
         save_dir=args.save_dir,
         workers=args.workers,
+        resume=args.resume,
     )
 
     trainer.train()

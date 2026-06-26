@@ -40,6 +40,27 @@ MODEL_SIZE_MAP = {
     "m-0.5x": {"backbone": "0.5x", "fpn_channels": 96},
 }
 
+FLASHDET_SIZES = frozenset({"p", "n", "s", "m", "l", "x"})
+_LEGACY_FLASHDET_SIZE = {"m": "n", "m-0.5x": "n", "m-1.5x": "s"}
+
+
+def resolve_flashdet_size(model_size: str) -> str:
+    """Map trainer model_size to FlashDet ``size`` argument."""
+    if model_size in FLASHDET_SIZES:
+        return model_size
+    return _LEGACY_FLASHDET_SIZE.get(model_size, "n")
+
+
+def resolve_model_cfg(model_size: str) -> Dict[str, Any]:
+    """Checkpoint metadata for legacy and modern FlashDet sizes."""
+    if model_size in MODEL_SIZE_MAP:
+        return dict(MODEL_SIZE_MAP[model_size])
+    return {
+        "backbone": model_size,
+        "fpn_channels": 64 if model_size == "p" else None,
+        "size": resolve_flashdet_size(model_size),
+    }
+
 
 class Trainer:
     """High-level trainer for FlashDet.
@@ -103,6 +124,8 @@ class Trainer:
         lora_targets: Optional[List[str]] = None,
         qlora: bool = False,
         qlora_dtype: str = "int8",
+        # Backbone (Pico only)
+        backbone_type: str = "shufflenet",
         # Augmentations
         mosaic: bool = False,
         mixup: bool = False,
@@ -145,6 +168,7 @@ class Trainer:
         self.qlora = qlora
         self.qlora_dtype = qlora_dtype
         self.architecture = architecture
+        self.backbone_type = backbone_type
         self.mosaic = mosaic
         self.mixup = mixup
         self.copy_paste = copy_paste
@@ -156,7 +180,7 @@ class Trainer:
         if config is not None:
             self._apply_config_defaults(config)
 
-        self._model_cfg = MODEL_SIZE_MAP[self.model_size]
+        self._model_cfg = resolve_model_cfg(self.model_size)
 
         # Resolve device
         if torch.cuda.is_available():
@@ -294,11 +318,12 @@ class Trainer:
         # Build model
         arch = self.architecture.lower()
         if arch in ("flashdet", ""):
-            size_key = {"m": "n", "m-0.5x": "n", "m-1.5x": "s"}.get(self.model_size, "n")
+            size_key = resolve_flashdet_size(self.model_size)
             model = FlashDet(
                 num_classes=num_classes,
                 size=size_key,
                 total_epochs=self.epochs,
+                backbone_type=self.backbone_type,
             ).to(self.device)
         else:
             cfg.model.num_classes = num_classes
@@ -330,6 +355,7 @@ class Trainer:
             model = nn.DataParallel(model)
 
         raw_model = model.module if use_multi_gpu else model
+        self._post_build_model(raw_model)
 
         # torchtune optimizations
         if self.activation_checkpointing:
@@ -350,20 +376,18 @@ class Trainer:
             betas=(0.9, 0.999),
         )
 
-        # LR schedule
-        eta_min = 0.00005
-        eta_min_factor = eta_min / self.lr
+        # LR schedule (Ultralytics style: cosine from lr to lr*lrf)
+        lrf = getattr(self, 'lrf', 0.01)
 
-        def lr_lambda(epoch):
-            if epoch < self.warmup_epochs:
-                return (epoch + 1) / self.warmup_epochs
-            progress = (epoch - self.warmup_epochs) / max(self.epochs - self.warmup_epochs, 1)
-            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-            return eta_min_factor + (1.0 - eta_min_factor) * cosine
+        def _one_cycle(y1=0.0, y2=1.0, steps=100):
+            return lambda x: max((1 - math.cos(x * math.pi / steps)) / 2, 0) * (y2 - y1) + y1
+
+        lf = _one_cycle(1, lrf, self.epochs)
+        self._lf = lf
 
         scheduler = None
         if not self.optimizer_in_bwd:
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
 
         # EMA
         ema = ModelEMA(raw_model, decay=0.9998, warmup=2000)
@@ -387,70 +411,76 @@ class Trainer:
         model_config = {
             "num_classes": num_classes,
             "input_size": self.input_size,
+            "model_size": resolve_flashdet_size(self.model_size),
             "backbone_size": self._model_cfg["backbone"],
-            "fpn_channels": self._model_cfg["fpn_channels"],
+            "fpn_channels": self._model_cfg.get("fpn_channels"),
             "class_names": class_names,
             "architecture": self.architecture,
         }
 
-        # Training loop
-        self._logger.info("\nStarting training...")
+        # Iteration-based warmup (Ultralytics style)
+        nb = len(train_loader)
+        nw = max(round(self.warmup_epochs * nb), 100) if self.warmup_epochs > 0 else -1
+        warmup_momentum = 0.8
+        base_momentum = 0.937
+
+        self._logger.info(f"\nStarting training...")
+        self._logger.info(f"LR schedule: {self.lr} -> {self.lr * lrf} (cosine)")
+        self._logger.info(f"Warmup: {nw} iterations ({self.warmup_epochs} epochs)")
         epochs_without_improvement = 0
         self.callbacks.fire("on_train_start", self)
 
         for epoch in range(start_epoch, self.epochs):
-            if self.optimizer_in_bwd:
-                lr_factor = lr_lambda(epoch)
-                current_lr = self.lr * lr_factor
-                optimizer.set_lr(current_lr)
-            else:
-                current_lr = optimizer.param_groups[0]["lr"]
+            if scheduler is not None:
+                scheduler.step()
+            current_lr = optimizer.param_groups[0]["lr"]
 
             self._logger.info(f"\nEpoch {epoch + 1}/{self.epochs} (lr={current_lr:.6f})")
             self.callbacks.fire("on_epoch_start", self, epoch + 1)
 
             train_losses = self._train_one_epoch(
-                model, train_loader, optimizer, epoch + 1, ema, scaler,
+                model, train_loader, optimizer, epoch, ema, scaler,
+                nb=nb, nw=nw, warmup_momentum=warmup_momentum,
+                base_momentum=base_momentum, lf=lf,
             )
 
             epoch_metrics = {"train_loss": train_losses["loss"], "lr": current_lr}
 
-            # Validate
-            if (epoch + 1) % cfg.train.val_interval == 0:
-                self.callbacks.fire("on_val_start", self)
-                val_loss, map50 = self._validate(
-                    raw_model, val_loader, ema, class_names,
+            # Validate every epoch (Ultralytics style)
+            self.callbacks.fire("on_val_start", self)
+            val_loss, map50 = self._validate(
+                raw_model, val_loader, ema, class_names,
+            )
+            epoch_metrics["val_loss"] = val_loss
+            epoch_metrics["val_mAP"] = map50
+            self.callbacks.fire("on_val_end", self, {"val_loss": val_loss, "val_mAP": map50})
+
+            if val_loss < best_loss:
+                best_loss = val_loss
+
+            if map50 > best_map50:
+                best_map50 = map50
+                epochs_without_improvement = 0
+                best_path = os.path.join(self.save_dir, "checkpoint_best.pth")
+                save_checkpoint(
+                    raw_model, optimizer, epoch, val_loss,
+                    best_path,
+                    scheduler=scheduler, config=model_config,
+                    ema=ema,
                 )
-                epoch_metrics["val_loss"] = val_loss
-                epoch_metrics["val_mAP"] = map50
-                self.callbacks.fire("on_val_end", self, {"val_loss": val_loss, "val_mAP": map50})
+                save_inference_weights(
+                    ema.ema,
+                    os.path.join(self.save_dir, "model_best_inference.pth"),
+                    config=model_config, half=False,
+                )
+                self._logger.info(f"  Best model saved (mAP@0.5: {best_map50:.4f})")
+                self.callbacks.fire("on_checkpoint", self, best_path, True)
+            else:
+                epochs_without_improvement += 1
 
-                if val_loss < best_loss:
-                    best_loss = val_loss
-
-                if map50 > best_map50:
-                    best_map50 = map50
-                    epochs_without_improvement = 0
-                    best_path = os.path.join(self.save_dir, "checkpoint_best.pth")
-                    save_checkpoint(
-                        raw_model, optimizer, epoch, val_loss,
-                        best_path,
-                        scheduler=scheduler, config=model_config,
-                        ema=ema,
-                    )
-                    save_inference_weights(
-                        ema.ema,
-                        os.path.join(self.save_dir, "model_best_inference.pth"),
-                        config=model_config, half=False,
-                    )
-                    self._logger.info(f"  Best model saved (mAP@0.5: {best_map50:.4f})")
-                    self.callbacks.fire("on_checkpoint", self, best_path, True)
-                else:
-                    epochs_without_improvement += cfg.train.val_interval
-
-                if self.patience > 0 and epochs_without_improvement >= self.patience:
-                    self._logger.info(f"Early stopping at epoch {epoch + 1}")
-                    break
+            if self.patience > 0 and epochs_without_improvement >= self.patience:
+                self._logger.info(f"Early stopping at epoch {epoch + 1} (patience={self.patience})")
+                break
 
             self.callbacks.fire("on_epoch_end", self, epoch + 1, epoch_metrics)
 
@@ -473,9 +503,6 @@ class Trainer:
                     config=model_config, half=False,
                 )
                 self.callbacks.fire("on_checkpoint", self, last_path, False)
-
-                if scheduler is not None:
-                    scheduler.step()
                 continue
             break
 
@@ -512,6 +539,9 @@ class Trainer:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _post_build_model(self, raw_model: nn.Module) -> None:
+        """Hook for subclasses to attach extra trainable modules to the model."""
 
     def _resolve_class_names(self, cfg) -> List[str]:
         class_names = None
@@ -578,19 +608,34 @@ class Trainer:
                 except ValueError as e:
                     self._logger.warning(f"COCO pretrained unavailable: {e}")
 
-    def _train_one_epoch(self, model, dataloader, optimizer, epoch, ema, scaler):
+    def _train_one_epoch(self, model, dataloader, optimizer, epoch, ema, scaler,
+                         nb=None, nw=-1, warmup_momentum=0.8, base_momentum=0.937,
+                         lf=None):
         model.train()
         use_amp = scaler is not None
         loss_meter = AverageMeter("Loss")
         sub_meters = {}
         raw_model = model.module if hasattr(model, "module") else model
+        if nb is None:
+            nb = len(dataloader)
 
         for batch_idx, (images, gt_meta) in enumerate(dataloader):
+            # Iteration-based warmup (Ultralytics style)
+            ni = batch_idx + nb * epoch
+            if ni <= nw:
+                xi = [0, nw]
+                for pg in optimizer.param_groups:
+                    pg['lr'] = np.interp(
+                        ni, xi, [0.0, pg.get('initial_lr', self.lr) * (lf(epoch) if lf else 1.0)]
+                    )
+                    if 'momentum' in pg:
+                        pg['momentum'] = np.interp(ni, xi, [warmup_momentum, base_momentum])
+
             self.callbacks.fire("on_batch_start", self, batch_idx, (images, gt_meta))
             images = images.to(self.device)
 
             with torch.amp.autocast(self.device.type, enabled=use_amp):
-                output = model(images, gt_meta, epoch=epoch)
+                output = model(images, gt_meta, epoch=epoch + 1)
                 loss = output["loss"] / self.grad_accum
 
             if torch.isnan(loss):
@@ -604,11 +649,11 @@ class Trainer:
             if (batch_idx + 1) % self.grad_accum == 0 or (batch_idx + 1) == len(dataloader):
                 if scaler:
                     scaler.unscale_(optimizer)
-                    nn.utils.clip_grad_norm_(raw_model.parameters(), 35.0)
+                    nn.utils.clip_grad_norm_(raw_model.parameters(), 10.0)
                     scaler.step(optimizer)
                     scaler.update()
                 else:
-                    nn.utils.clip_grad_norm_(raw_model.parameters(), 35.0)
+                    nn.utils.clip_grad_norm_(raw_model.parameters(), 10.0)
                     optimizer.step()
                 optimizer.zero_grad()
 
@@ -626,10 +671,11 @@ class Trainer:
                 sub_meters[key].update(v)
             self.callbacks.fire("on_batch_end", self, batch_idx, output["loss"].item())
 
-            if (batch_idx + 1) % 10 == 0:
+            if (batch_idx + 1) % 20 == 0:
+                cur_lr = optimizer.param_groups[0]['lr']
                 sub_str = ", ".join(f"{k}: {m.avg:.4f}" for k, m in sub_meters.items())
                 self._logger.info(
-                    f"  [{batch_idx+1}/{len(dataloader)}] Loss: {loss_meter.avg:.4f}"
+                    f"  [{batch_idx+1}/{len(dataloader)}] Loss: {loss_meter.avg:.4f} LR: {cur_lr:.6f}"
                     + (f" ({sub_str})" if sub_str else "")
                 )
 

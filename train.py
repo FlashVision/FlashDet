@@ -272,8 +272,9 @@ def _save_training_csv(history, csv_path):
 
 
 def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_dir=None, config=None, ema=None,
-                    class_names=None, colors=None, scaler=None, grad_accum=1):
-    """Train for one epoch with optional AMP and gradient accumulation."""
+                    class_names=None, colors=None, scaler=None, grad_accum=1,
+                    nb=None, nw=-1, warmup_momentum=0.8, base_momentum=0.937, lf=None, base_lr=0.001):
+    """Train for one epoch with iteration-based warmup (Ultralytics style)."""
     model.train()
     use_amp = scaler is not None
 
@@ -293,27 +294,40 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
             pass
 
     raw_model = model.module if hasattr(model, 'module') else model
+    if nb is None:
+        nb = len(dataloader)
 
     zero_pos_batches = 0
     total_batches = 0
 
     # Multi-scale training: randomly vary input size every 10 batches
-    # for scale-invariant learning (256-416 in steps of 32)
     multi_scale_sizes = [256, 288, 320, 352, 384, 416]
     current_ms_size = None
 
     for batch_idx, (images, gt_meta) in enumerate(dataloader):
+        # Iteration-based warmup (Ultralytics style)
+        ni = batch_idx + nb * (epoch - 1)
+        if ni <= nw:
+            xi = [0, nw]
+            for pg in optimizer.param_groups:
+                pg['lr'] = np.interp(
+                    ni, xi, [0.0, pg.get('initial_lr', base_lr) * (lf(epoch - 1) if lf else 1.0)]
+                )
+                if 'momentum' in pg:
+                    pg['momentum'] = np.interp(ni, xi, [warmup_momentum, base_momentum])
+
         images = images.to(device)
 
         # Multi-scale resize every 10 batches
         if batch_idx % 10 == 0:
             current_ms_size = random.choice(multi_scale_sizes)
         if current_ms_size is not None and current_ms_size != images.shape[-1]:
+            orig_size = float(images.shape[-1])
             images = torch.nn.functional.interpolate(
                 images, size=(current_ms_size, current_ms_size),
                 mode="bilinear", align_corners=False,
             )
-            scale = current_ms_size / 320.0
+            scale = current_ms_size / orig_size
             for i in range(len(gt_meta["gt_bboxes"])):
                 if len(gt_meta["gt_bboxes"][i]) > 0:
                     gt_meta["gt_bboxes"][i] = gt_meta["gt_bboxes"][i] * scale
@@ -345,11 +359,11 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(dataloader):
             if scaler:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(raw_model.parameters(), 35.0)
+                torch.nn.utils.clip_grad_norm_(raw_model.parameters(), 10.0)
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                torch.nn.utils.clip_grad_norm_(raw_model.parameters(), 35.0)
+                torch.nn.utils.clip_grad_norm_(raw_model.parameters(), 10.0)
                 optimizer.step()
             optimizer.zero_grad()
 
@@ -503,12 +517,17 @@ def main():
     parser.add_argument("--resume", default=None, help="Resume from checkpoint")
     parser.add_argument("--device", default="cuda", help="Device")
     parser.add_argument("--warmup-epochs", type=int, default=5, help="Warmup epochs")
+    parser.add_argument("--subset", type=float, default=1.0,
+                        help="Fraction of training data to use (0.0-1.0). E.g. 0.5 for 50%%.")
     parser.add_argument("--patience", type=int, default=50,
                         help="Early stopping patience (epochs without mAP improvement). 0 disables.")
     parser.add_argument("--val-interval", type=int, default=None,
                         help="Run validation/mAP every N epochs (default: config value, usually 5). Set to 1 for every epoch.")
     parser.add_argument("--model-size", default="n", choices=["p", "n", "s", "m", "l", "x"],
                         help="Model size: p (~298K pico), n (~1.5M), s (~5.4M), m (~18M), l, x")
+    parser.add_argument("--backbone", default="shufflenet",
+                        choices=["shufflenet", "repnext"],
+                        help="Pico backbone: shufflenet (ShuffleNetV2-0.5x), repnext (RepNeXt-Pico)")
     parser.add_argument("--architecture", default="flashdet",
                         choices=["flashdet", "detr", "rt-detr", "yolov9", "yolov10", "yolov11", "grounding-dino"],
                         help="Detection architecture (default: flashdet)")
@@ -689,6 +708,18 @@ def main():
         distributed=use_ddp,
     )
     
+    if args.subset < 1.0:
+        ds = train_loader.dataset
+        n_total = len(ds.img_ids)
+        n_keep = max(1, int(n_total * args.subset))
+        random.seed(42)
+        ds.img_ids = sorted(random.sample(ds.img_ids, n_keep))
+        if hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'num_samples'):
+            s = train_loader.sampler
+            s.num_samples = math.ceil(len(ds) / s.num_replicas)
+            s.total_size = s.num_samples * s.num_replicas
+        logger.info(f"Subset: using {n_keep}/{n_total} training images ({args.subset*100:.0f}%%)")
+
     logger.info(f"Train batches: {len(train_loader)}")
     logger.info(f"Val batches: {len(val_loader)}")
     aug_flags = []
@@ -709,6 +740,7 @@ def main():
             num_classes=num_classes,
             size=model_size,
             total_epochs=args.epochs,
+            backbone_type=getattr(args, "backbone", "shufflenet"),
         ).to(device)
 
         info = model.get_model_info()
@@ -870,29 +902,34 @@ def main():
             betas=(0.9, 0.999),
         )
     
-    # LR schedule: linear warmup then cosine annealing with eta_min=0.00005
-    # eta_min matches official FlashDet config (prevents LR from going too low)
-    eta_min = 0.00005
-    eta_min_factor = eta_min / base_lr  # e.g. 0.00005 / 0.001 = 0.05
+    # LR schedule (Ultralytics style): cosine from lr0 to lr0*lrf
+    lrf = 0.01  # final LR = lr0 * 0.01 (aggressive decay like Ultralytics)
 
-    def lr_lambda(epoch):
-        if epoch < args.warmup_epochs:
-            return (epoch + 1) / args.warmup_epochs
-        else:
-            progress = (epoch - args.warmup_epochs) / max(args.epochs - args.warmup_epochs, 1)
-            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-            return eta_min_factor + (1.0 - eta_min_factor) * cosine
+    def one_cycle(y1=0.0, y2=1.0, steps=100):
+        return lambda x: max((1 - math.cos(x * math.pi / steps)) / 2, 0) * (y2 - y1) + y1
 
-    # When optimizer_in_bwd is used, the optimizer is fused into backward hooks.
-    # We manually adjust LR via set_lr() instead of a scheduler.
+    lf = one_cycle(1, lrf, args.epochs)
+
+    def sync_lr_after_resume(start_ep: int) -> float:
+        factor = lf(start_ep)
+        target_lr = base_lr * factor
+        for pg in optimizer.param_groups:
+            pg["lr"] = target_lr
+        if scheduler is not None:
+            scheduler.base_lrs = [base_lr] * len(optimizer.param_groups)
+            scheduler.last_epoch = start_ep - 1
+            scheduler._last_lr = [target_lr] * len(optimizer.param_groups)
+        return target_lr
+
     scheduler = None
     if not args.optimizer_in_bwd:
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
     else:
         logger.info("Scheduler disabled (optimizer fused into backward — LR adjusted manually)")
-    
-    logger.info(f"Base LR: {base_lr}, Weight Decay: {config.train.weight_decay}")
-    logger.info(f"Warmup: {args.warmup_epochs} epochs, eta_min: {eta_min:.6f}")
+
+    logger.info(f"Base LR: {base_lr}, Final LR: {base_lr * lrf:.6f} (lrf={lrf})")
+    logger.info(f"Weight Decay: {config.train.weight_decay}")
+    logger.info(f"Warmup: {args.warmup_epochs} epochs (iteration-based)")
 
     # --- torchtune optimizations summary ---
     tt_flags = []
@@ -928,7 +965,8 @@ def main():
     # NOTE: best_map50 is initialised in the training-loop block below.
 
     if args.resume:
-        ckpt = load_checkpoint(raw_model, args.resume, optimizer, scheduler, device)
+        # Load weights + optimizer momentum; skip scheduler (rebuilt below).
+        ckpt = load_checkpoint(raw_model, args.resume, optimizer, None, device)
         start_epoch = ckpt["epoch"] + 1
         best_loss = ckpt.get("loss", float("inf"))
         # Restore EMA state if saved
@@ -945,7 +983,18 @@ def main():
             ema = ModelEMA(raw_model, decay=0.9998, warmup=2000)
             logger.info("EMA warm-started from checkpoint weights")
         logger.info(f"Resumed from epoch {start_epoch}")
-    
+        if scheduler is not None:
+            for pg in optimizer.param_groups:
+                pg["lr"] = base_lr
+            scheduler = torch.optim.lr_scheduler.LambdaLR(
+                optimizer, lr_lambda, last_epoch=start_epoch - 1,
+            )
+        resumed_lr = sync_lr_after_resume(start_epoch)
+        logger.info(
+            f"Resume LR synced for epoch {start_epoch + 1}/{args.epochs}: "
+            f"lr={resumed_lr:.6f} (base_lr={base_lr}, warmup_epochs={args.warmup_epochs})"
+        )
+
     model_config = {
         "num_classes": num_classes,
         "input_size": input_size,
@@ -954,12 +1003,34 @@ def main():
         "architecture": arch,
     }
 
+    # Iteration-based warmup (Ultralytics style)
+    nb = len(train_loader)
+    nw = max(round(args.warmup_epochs * nb), 100) if args.warmup_epochs > 0 else -1
+    warmup_momentum = 0.8
+    base_momentum = 0.937
+
     # Training loop
     logger.info("\nStarting training...")
+    logger.info(f"LR schedule: {base_lr} -> {base_lr * lrf} (cosine, lrf={lrf})")
+    logger.info(f"Warmup: {nw} iterations ({args.warmup_epochs} epochs)")
     logger.info("-" * 60)
 
-    best_map50 = 0.0   # Best model selected by mAP@0.5, not by val loss
+    best_map50 = 0.0
     epochs_without_improvement = 0
+    if args.resume:
+        resume_dir = os.path.dirname(os.path.abspath(args.resume))
+        csv_path = os.path.join(resume_dir, "training_log.csv")
+        if os.path.exists(csv_path):
+            try:
+                import csv
+                with open(csv_path, newline="") as f:
+                    rows = list(csv.DictReader(f))
+                maps = [float(r["mAP@0.5"]) for r in rows if r.get("mAP@0.5")]
+                if maps:
+                    best_map50 = max(maps)
+                    logger.info(f"Restored best mAP@0.5={best_map50:.4f} from {csv_path}")
+            except Exception as e:
+                logger.warning(f"Could not restore best mAP from CSV: {e}")
 
     # ---- History tracking for graphs & CSV ----
     history = {
@@ -973,13 +1044,17 @@ def main():
     os.makedirs(plots_dir, exist_ok=True)
 
     for epoch in range(start_epoch, args.epochs):
+        # Step scheduler at epoch start (Ultralytics style)
+        if scheduler is not None:
+            scheduler.step()
+
         # Set epoch on distributed sampler for proper shuffling
         if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
 
         # For optimizer_in_bwd, manually compute and set the LR each epoch
         if args.optimizer_in_bwd:
-            lr_factor = lr_lambda(epoch)
+            lr_factor = lf(epoch)
             current_lr = base_lr * lr_factor
             optimizer.set_lr(current_lr)
         else:
@@ -989,12 +1064,14 @@ def main():
         
         epoch_start = time.time()
 
-        # Train
+        # Train (with iteration-based warmup)
         train_losses = train_one_epoch(
             model, train_loader, optimizer, device, epoch + 1, logger,
             save_dir=args.save_dir, config=config, ema=ema,
             class_names=class_names, colors=colors,
             scaler=scaler, grad_accum=grad_accum,
+            nb=nb, nw=nw, warmup_momentum=warmup_momentum,
+            base_momentum=base_momentum, lf=lf, base_lr=base_lr,
         )
 
         epoch_time = time.time() - epoch_start
@@ -1023,10 +1100,9 @@ def main():
         history["train_cls"].append(train_losses.get("o2m_cls", train_losses.get("loss_cls", 0)))
         history["train_l1"].append(train_losses.get("o2m_l1", train_losses.get("loss_l1", 0)))
 
-        # Validate using EMA weights (better accuracy than raw model)
-        # val_interval controls how often we run the (relatively expensive) mAP pass.
+        # Validate every epoch (Ultralytics style)
         # Only rank 0 runs validation and saves checkpoints in DDP.
-        if (epoch + 1) % config.train.val_interval == 0 and is_main:
+        if is_main:
             val_loss, map50, val_sub = validate(
                 raw_model, val_loader, device, logger, ema=ema, class_names=class_names
             )
@@ -1068,7 +1144,7 @@ def main():
                 )
                 logger.info(f"Saved best model (EMA mAP@0.5: {best_map50:.4f}, val loss: {val_loss:.4f})")
             else:
-                epochs_without_improvement += config.train.val_interval
+                epochs_without_improvement += 1
                 logger.info(
                     f"  No mAP improvement for {epochs_without_improvement} epochs "
                     f"(best={best_map50:.4f}, current={map50:.4f})"
@@ -1116,10 +1192,6 @@ def main():
         # Sync all ranks before next epoch
         if use_ddp:
             dist.barrier()
-
-        # Step scheduler (no-op when optimizer_in_bwd; LR is set manually above)
-        if scheduler is not None:
-            scheduler.step()
     
     # Only rank 0 saves final weights
     if not is_main:

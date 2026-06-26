@@ -26,13 +26,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from flashdet.engine.training.trainer import Trainer, MODEL_SIZE_MAP
+from flashdet.engine.training.trainer import Trainer, resolve_flashdet_size
 from flashdet.engine.core.ema import ModelEMA
 from flashdet.models import FlashDet
 from flashdet.models.detector import build_model
+from flashdet.losses.kd_loss import FeatureDistillationLoss
 from flashdet.utils import AverageMeter
 
 logger = logging.getLogger(__name__)
+
+
+def _neck_out_channels(model: nn.Module) -> int:
+    neck = getattr(model, "neck", None)
+    if neck is not None and getattr(neck, "out_channels", None):
+        return neck.out_channels
+    head = getattr(model, "head", None)
+    if head is not None and getattr(head, "o2o_heads", None):
+        h0 = head.o2o_heads[0]
+        if hasattr(h0, "cls_pred"):
+            return h0.cls_pred.in_channels
+    return 96
 
 
 class KDTrainer(Trainer):
@@ -73,6 +86,23 @@ class KDTrainer(Trainer):
         self.kd_feature_weight = kd_feature_weight
         self.kd_feature_layers = kd_feature_layers or ["stage2", "stage3", "stage4"]
         self._teacher_model = None
+        self._feature_kd: Optional[FeatureDistillationLoss] = None
+
+    def _post_build_model(self, raw_model: nn.Module) -> None:
+        if self._teacher_model is None or self.kd_feature_weight <= 0:
+            return
+        s_ch = _neck_out_channels(raw_model)
+        t_ch = _neck_out_channels(self._teacher_model)
+        self._feature_kd = FeatureDistillationLoss(
+            student_channels=s_ch,
+            teacher_channels=t_ch,
+            num_levels=3,
+            loss_weight=1.0,
+        ).to(self.device)
+        raw_model.add_module("feature_kd", self._feature_kd)
+        self._logger.info(
+            f"Feature KD adapters: student={s_ch}ch -> teacher={t_ch}ch"
+        )
 
     def train(self):
         """Override to build teacher before starting the training loop."""
@@ -89,10 +119,9 @@ class KDTrainer(Trainer):
         """Build and freeze the teacher model."""
         arch = self.teacher_architecture.lower()
         if arch in ("flashdet", ""):
-            size_key = {"m": "n", "m-0.5x": "n", "m-1.5x": "s"}.get(self.teacher_size, "n")
             teacher = FlashDet(
                 num_classes=num_classes,
-                size=size_key,
+                size=resolve_flashdet_size(self.teacher_size),
                 total_epochs=self.epochs,
             )
         else:
@@ -124,14 +153,14 @@ class KDTrainer(Trainer):
     def _kd_feature_loss(
         self, student_feats: List[torch.Tensor], teacher_feats: List[torch.Tensor],
     ) -> torch.Tensor:
-        """L2 feature distillation loss (with spatial alignment)."""
+        """FPN feature distillation with channel adapters when needed."""
+        if self._feature_kd is not None:
+            return self._feature_kd(student_feats, teacher_feats)
         loss = torch.tensor(0.0, device=self.device)
         for sf, tf in zip(student_feats, teacher_feats):
-            if sf.shape != tf.shape:
-                tf = F.interpolate(tf, size=sf.shape[2:], mode="bilinear", align_corners=False)
-                if tf.shape[1] != sf.shape[1]:
-                    continue
-            loss = loss + F.mse_loss(sf, tf)
+            tf = F.interpolate(tf, size=sf.shape[2:], mode="bilinear", align_corners=False)
+            if tf.shape[1] == sf.shape[1]:
+                loss = loss + F.mse_loss(sf, tf)
         return loss / max(len(student_feats), 1)
 
     def _train_one_epoch(self, model, dataloader, optimizer, epoch, ema, scaler):
