@@ -1,4 +1,5 @@
 from .shufflenet import ShuffleNetV2, ShuffleUnit, channel_shuffle
+from .repnext_pico import RepNeXtPico
 from .resnet import ResNetBackbone, ResNetMultiScaleBackbone
 from .text_encoder import TextEncoder
 from .yolov9_backbone import YOLOv9Backbone
@@ -7,6 +8,7 @@ from .yolov11_backbone import YOLOv11Backbone
 from flashdet.registry import BACKBONES
 
 BACKBONES.register("ShuffleNetV2")(ShuffleNetV2)
+BACKBONES.register("RepNeXtPico")(RepNeXtPico)
 BACKBONES.register("ResNet")(ResNetBackbone)
 BACKBONES.register("ResNetMultiScale")(ResNetMultiScaleBackbone)
 BACKBONES.register("TextEncoder")(TextEncoder)
@@ -16,6 +18,7 @@ BACKBONES.register("YOLOv11Backbone")(YOLOv11Backbone)
 
 __all__ = [
     "ShuffleNetV2",
+    "RepNeXtPico",
     "ShuffleUnit",
     "channel_shuffle",
     "ResNetBackbone",

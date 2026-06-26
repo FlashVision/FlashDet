@@ -225,23 +225,35 @@ class FlashDetPico(nn.Module):
         total_epochs: int = 100,
         neck_channels: int = 64,
         pretrained_backbone: bool = True,
+        backbone_type: str = "shufflenet",
         **kwargs,
     ):
         super().__init__()
         from flashdet.models.backbone.shufflenet import ShuffleNetV2
+        from flashdet.models.backbone.repnext_pico import RepNeXtPico
         from flashdet.models.neck.ghost_pan import GhostPAN
 
         self.num_classes = num_classes
         self.size = "p"
         self.strides = strides
         self.total_epochs = total_epochs
+        self.backbone_type = backbone_type
 
-        self.backbone = ShuffleNetV2(
-            model_size="0.5x",
-            out_stages=(2, 3, 4),
-            pretrained=pretrained_backbone,
-            activation="LeakyReLU",
-        )
+        if backbone_type == "repnext":
+            self.backbone = RepNeXtPico(
+                stem_channels=24,
+                stage_channels=(48, 96, 192),
+                stage_depths=(2, 3, 1),
+                out_stages=(0, 1, 2),
+                activation="LeakyReLU",
+            )
+        else:
+            self.backbone = ShuffleNetV2(
+                model_size="0.5x",
+                out_stages=(2, 3, 4),
+                pretrained=pretrained_backbone,
+                activation="LeakyReLU",
+            )
 
         self.neck = GhostPAN(
             in_channels=self.backbone.out_channels,
@@ -268,12 +280,14 @@ class FlashDetPico(nn.Module):
 
         self._init_weights()
 
-        # Log backbone pretrained status
         bb_loaded = getattr(self.backbone, "pretrained_loaded", False)
-        logger.info(
-            "FlashDetPico backbone: %s",
-            "ImageNet pretrained" if bb_loaded else "RANDOM init (pretrained failed)",
-        )
+        if backbone_type == "repnext":
+            logger.info("FlashDetPico backbone: RepNeXtPico (trained from scratch)")
+        else:
+            logger.info(
+                "FlashDetPico backbone: ShuffleNetV2-0.5x %s",
+                "(ImageNet pretrained)" if bb_loaded else "(RANDOM init)",
+            )
 
     def _init_weights(self):
         """Kaiming-normal init for neck + head; backbone keeps pretrained weights."""
@@ -324,11 +338,13 @@ class FlashDetPico(nn.Module):
             # feat_sizes is a list of tuples).
             self._last_loss_states = loss_states
 
-        if not self.training:
-            result["preds"] = head_out["o2o_cls"]
+        if return_features or not self.training:
             result["o2o_cls"] = head_out["o2o_cls"]
             result["o2o_reg"] = head_out["o2o_reg"]
             result["feat_sizes"] = head_out["feat_sizes"]
+
+        if not self.training:
+            result["preds"] = head_out["o2o_cls"]
         return result
 
     # ------ Anchor grid cache (avoids recompute per call) ------
@@ -545,11 +561,13 @@ class FlashDet(nn.Module):
             # feat_sizes is a list of tuples).
             self._last_loss_states = loss_states
 
-        if not self.training:
-            result["preds"] = head_out["o2o_cls"]
+        if return_features or not self.training:
             result["o2o_cls"] = head_out["o2o_cls"]
             result["o2o_reg"] = head_out["o2o_reg"]
             result["feat_sizes"] = head_out["feat_sizes"]
+
+        if not self.training:
+            result["preds"] = head_out["o2o_cls"]
 
         return result
 

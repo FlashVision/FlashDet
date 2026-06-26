@@ -110,10 +110,32 @@ def _wrap_dataset_with_augmentations(
 
     The augmentations are applied *before* the regular TrainTransform so
     they operate on raw (un-normalised) images and xyxy boxes.
+
+    All images (main + extras for mosaic/mixup/copy-paste) are letterbox-
+    resized to ``input_size`` before compositing.  This keeps object scales
+    consistent with the validation pipeline and avoids the train-val
+    distribution gap that cripples mAP when mosaic operates on un-resized
+    raw images.
     """
+    import cv2
+    from .transforms import _get_resize_matrix, _warp_boxes
+
+    def _resize_to_input(img, boxes, target_size):
+        h, w = img.shape[:2]
+        tw, th = target_size
+        M = _get_resize_matrix((w, h), (tw, th), keep_ratio=True)
+        img_out = cv2.warpPerspective(
+            img, M, dsize=(tw, th), borderValue=(114, 114, 114),
+        )
+        if len(boxes) > 0:
+            boxes = _warp_boxes(boxes, M, tw, th)
+        return img_out, boxes
+
     def _random_sample():
         idx = random.randint(0, len(dataset) - 1)
-        return dataset.get_raw_item(idx)
+        img, boxes, labels = dataset.get_raw_item(idx)
+        img, boxes = _resize_to_input(img, boxes, input_size)
+        return img, boxes, labels
 
     original_transform = dataset.transform
 
@@ -126,6 +148,7 @@ def _wrap_dataset_with_augmentations(
         augmenters.append(CopyPaste(extra_image_fn=_random_sample))
 
     def _augmented_transform(image, boxes, labels):
+        image, boxes = _resize_to_input(image, boxes, input_size)
         for aug in augmenters:
             if random.random() < 0.5:
                 image, boxes, labels = aug(image, boxes, labels)

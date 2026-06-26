@@ -41,11 +41,57 @@ def make_color_palette(n: int) -> Dict[int, Tuple[int, int, int]]:
 
 def _font_params(img_h: int):
     """Return (font_scale, thickness, pad) scaled to image height."""
-    base = max(img_h / 480.0, 0.4)
-    scale = round(base * 0.45, 2)
-    thickness = max(1, int(base * 0.9))
-    pad = max(2, int(base * 3))
+    base = max(img_h / 480.0, 0.6)
+    scale = round(base * 0.70, 2)
+    thickness = max(2, int(base * 1.4))
+    pad = max(4, int(base * 5))
     return scale, thickness, pad
+
+
+def _color_for_label(name: str, cls_id: int = None, colors: Dict = None) -> Tuple[int, int, int]:
+    """Return a high-contrast BGR color for a class name or id."""
+    colors = colors or COLORS
+    if name in colors:
+        return colors[name]
+    if cls_id is not None and cls_id in colors:
+        return colors[cls_id]
+    hue = (hash(name) % 360) / 360.0
+    r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 0.95)
+    return (int(b * 255), int(g * 255), int(r * 255))
+
+
+def _draw_label(
+    image: np.ndarray,
+    text: str,
+    x: int,
+    y: int,
+    color: Tuple[int, int, int],
+    font_scale: float,
+    font_thick: int,
+    pad: int,
+) -> Tuple[int, int, int, int]:
+    """Draw a readable label with filled background and dark outline."""
+    (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
+    h, w = image.shape[:2]
+
+    lx = max(0, min(x, w - tw - pad * 2))
+    ly = max(th + pad * 2, min(y, h - pad))
+    bg_tl = (lx, ly - th - pad)
+    bg_br = (lx + tw + pad * 2, ly + pad)
+    cv2.rectangle(image, bg_tl, bg_br, color, -1)
+    cv2.rectangle(image, bg_tl, bg_br, (0, 0, 0), max(1, font_thick // 2))
+
+    text_org = (lx + pad, ly)
+    for dx, dy in ((-1, -1), (-1, 1), (1, -1), (1, 1), (0, -1), (0, 1), (-1, 0), (1, 0)):
+        cv2.putText(
+            image, text, (text_org[0] + dx, text_org[1] + dy),
+            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), font_thick + 1, cv2.LINE_AA,
+        )
+    cv2.putText(
+        image, text, text_org, cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale, (255, 255, 255), font_thick, cv2.LINE_AA,
+    )
+    return bg_tl[0], bg_tl[1], bg_br[0], bg_br[1]
 
 
 def draw_boxes(
@@ -82,7 +128,7 @@ def draw_boxes(
         cls_id = int(label)
         name = class_names[cls_id] if cls_id < len(class_names) else f"cls_{cls_id}"
 
-        color = colors.get(name) or colors.get(cls_id, (255, 255, 255))
+        color = _color_for_label(name, cls_id, colors)
 
         cv2.rectangle(output, (x1, y1), (x2, y2), color, lt)
 
@@ -91,20 +137,14 @@ def draw_boxes(
 
         # Place label above the box; nudge down if it would overlap a prior label
         lx = x1
-        ly = y1 - pad
+        ly = max(y1, th + pad * 2)
         label_rect = (lx, ly - th - pad, lx + tw + pad * 2, ly + pad)
         for rx1, ry1, rx2, ry2 in used_regions:
             if lx < rx2 and lx + tw + pad * 2 > rx1 and label_rect[1] < ry2 and label_rect[3] > ry1:
-                ly = ry2 + th + pad
+                ly = min(output.shape[0] - pad, ry2 + th + pad * 2)
                 label_rect = (lx, ly - th - pad, lx + tw + pad * 2, ly + pad)
 
-        used_regions.append(label_rect)
-
-        bg_tl = (lx, ly - th - pad)
-        bg_br = (lx + tw + pad * 2, ly + pad)
-        cv2.rectangle(output, bg_tl, bg_br, color, -1)
-        cv2.putText(output, text, (lx + pad, ly), cv2.FONT_HERSHEY_SIMPLEX,
-                    font_scale, (255, 255, 255), font_thick, cv2.LINE_AA)
+        used_regions.append(_draw_label(output, text, lx, ly, color, font_scale, font_thick, pad))
 
     return output
 
@@ -134,24 +174,20 @@ def draw_detections(
             name = class_names[int(cls_id)] if int(cls_id) < len(class_names) else f"cls_{int(cls_id)}"
 
         x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-        color = COLORS.get(name, (255, 255, 255))
+        color = _color_for_label(name)
 
         cv2.rectangle(output, (x1, y1), (x2, y2), color, lt)
 
         text = f"{name}: {score:.2f}"
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
 
-        lx, ly = x1, y1 - pad
+        lx, ly = x1, max(y1, th + pad * 2)
         label_rect = (lx, ly - th - pad, lx + tw + pad * 2, ly + pad)
         for rx1, ry1, rx2, ry2 in used_regions:
             if lx < rx2 and lx + tw + pad * 2 > rx1 and label_rect[1] < ry2 and label_rect[3] > ry1:
-                ly = ry2 + th + pad
+                ly = min(output.shape[0] - pad, ry2 + th + pad * 2)
                 label_rect = (lx, ly - th - pad, lx + tw + pad * 2, ly + pad)
-        used_regions.append(label_rect)
-
-        cv2.rectangle(output, (lx, ly - th - pad), (lx + tw + pad * 2, ly + pad), color, -1)
-        cv2.putText(output, text, (lx + pad, ly), cv2.FONT_HERSHEY_SIMPLEX,
-                    font_scale, (255, 255, 255), font_thick, cv2.LINE_AA)
+        used_regions.append(_draw_label(output, text, lx, ly, color, font_scale, font_thick, pad))
 
     return output
 

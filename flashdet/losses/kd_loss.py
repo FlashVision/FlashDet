@@ -66,7 +66,7 @@ class LogitDistillationLoss(nn.Module):
         Returns:
             Dict with ``kd_cls_loss``, ``kd_reg_loss``, and ``kd_logit_loss``.
         """
-        reg_channels = 4 * (reg_max + 1)
+        reg_channels = 4 if reg_max <= 0 else 4 * (reg_max + 1)
         s_cls, s_reg = student_preds.split([num_classes, reg_channels], dim=-1)
         t_cls, t_reg = teacher_preds.split([num_classes, reg_channels], dim=-1)
 
