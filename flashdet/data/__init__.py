@@ -14,7 +14,7 @@ from .prepare import (
     summarize_coco_root,
 )
 from .download import download_dataset, list_datasets, DATASET_REGISTRY
-from .verify_annotations import verify_training_data, gt_verification_dir, GT_VERIFY_SUBDIR
+from .verify_annotations import verify_training_data
 
 __all__ = [
     "FlashDetDataset",
@@ -40,6 +40,4 @@ __all__ = [
     "list_datasets",
     "DATASET_REGISTRY",
     "verify_training_data",
-    "gt_verification_dir",
-    "GT_VERIFY_SUBDIR",
 ]

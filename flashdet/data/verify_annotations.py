@@ -529,19 +529,6 @@ def save_raw_gt_images(
             saved_paths.append(out_path)
             count += 1
 
-    # #region agent log
-    try:
-        import json as _j, time as _t
-        shapes = []
-        for p in saved_paths[:3]:
-            im = cv2.imread(p)
-            if im is not None:
-                shapes.append(list(im.shape))
-        with open("/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/.cursor/debug-8c3ea2.log", "a") as _f:
-            _f.write(_j.dumps({"sessionId": "8c3ea2", "hypothesisId": "H9", "location": "verify_annotations.py:save_raw_gt_images", "message": "gt_save_summary", "data": {"split": split_name, "saved": len(saved_paths), "mosaic_sources": mosaic_sources, "single_sources": single_sources, "has_tile_suffix": sum(1 for p in saved_paths if "_tile" in os.path.basename(p)), "sample_files": [os.path.basename(p) for p in saved_paths[:4]], "sample_shapes": shapes}, "timestamp": int(_t.time() * 1000)}) + "\n")
-    except Exception:
-        pass
-    # #endregion
 
     log.info(
         "Saved %d GT images (separate scenes/tiles, never 4-in-1) to %s (%s split)",
@@ -607,15 +594,6 @@ def save_verification_report(
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-    # #region agent log
-    try:
-        import json as _j, time as _t
-        gt_images = report.get("gt_images_saved", [])
-        with open("/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/.cursor/debug-8c3ea2.log", "a") as _f:
-            _f.write(_j.dumps({"sessionId": "8c3ea2", "hypothesisId": "H6", "location": "verify_annotations.py:save_verification_report", "message": "report_and_images_saved", "data": {"abs_output_dir": abs_output_dir, "gt_images_dir": report.get("gt_images_dir"), "num_gt_images": len(gt_images), "sample_images": gt_images[:3], "json_exists": os.path.isfile(json_path)}, "timestamp": int(_t.time() * 1000)}) + "\n")
-    except Exception:
-        pass
-    # #endregion
 
     log.info("Verification reports saved to: %s", abs_output_dir)
     log.info("  - verification_report.json")

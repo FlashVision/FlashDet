@@ -314,14 +314,6 @@ class Trainer:
             is_train=False,
         )
 
-        # #region agent log
-        try:
-            import json as _j, time as _t
-            with open("/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/.cursor/debug-8c3ea2.log", "a") as _f:
-                _f.write(_j.dumps({"sessionId": "8c3ea2", "hypothesisId": "H1", "location": "trainer.py:after_loaders", "message": "trainer_verify_status", "data": {"entrypoint": "Trainer", "save_dir": self.save_dir, "gt_verify_dir": os.path.join(self.save_dir, "gt_verification"), "cwd": os.getcwd(), "skip_verify": self.skip_verify_annotations, "will_run_verify": not self.skip_verify_annotations}, "timestamp": int(_t.time() * 1000)}) + "\n")
-        except Exception:
-            pass
-        # #endregion
 
         if not self.skip_verify_annotations:
             ann_ok = verify_training_data(
