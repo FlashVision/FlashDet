@@ -54,6 +54,11 @@ def _compute_branch_loss(
     total_l1_loss = torch.tensor(0.0, device=device)
     total_target_scores_sum = 0.0
 
+    # #region agent log
+    _dbg_log_loss_counter = getattr(_compute_branch_loss, '_counter', 0)
+    _compute_branch_loss._counter = _dbg_log_loss_counter + 1
+    # #endregion
+
     for b in range(B):
         cls_pred_b = cls_preds[b]        # [N, num_classes]
         reg_pred_b = reg_preds[b]        # [N, 4]
@@ -75,6 +80,24 @@ def _compute_branch_loss(
         )
 
         n_pos = fg_mask.sum().item()
+
+        # #region agent log
+        if _dbg_log_loss_counter < 10 and b == 0:
+            try:
+                import json as _json
+                import time as _time
+                _dbg_log = "/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/.cursor/debug-387c01.log"
+                _anchor_range_x = [float(anchor_centers[:,0].min()), float(anchor_centers[:,0].max())]
+                _anchor_range_y = [float(anchor_centers[:,1].min()), float(anchor_centers[:,1].max())]
+                _gt_x = [float(gt_bboxes[:,0].min()), float(gt_bboxes[:,2].max())]
+                _gt_y = [float(gt_bboxes[:,1].min()), float(gt_bboxes[:,3].max())]
+                _decoded_range = [float(decoded_bboxes[:,:2].min()), float(decoded_bboxes[:,2:].max())]
+                _cls_max = float(cls_scores.max())
+                with open(_dbg_log, "a") as _f:
+                    _f.write(_json.dumps({"sessionId":"387c01","hypothesisId":"H4_loss","location":"e2e_loss.py:_compute_branch_loss","message":"assigner_state","data":{"iter":_dbg_log_loss_counter,"batch":b,"n_gt":int(gt_bboxes.shape[0]),"n_pos":n_pos,"n_anchors":int(anchor_centers.shape[0]),"img_size":list(img_size),"anchor_x_range":_anchor_range_x,"anchor_y_range":_anchor_range_y,"gt_x_range":_gt_x,"gt_y_range":_gt_y,"decoded_bbox_range":_decoded_range,"max_cls_score":_cls_max,"gt_first3":gt_bboxes[:3].cpu().tolist(),"gt_labels_first3":gt_labels[:3].cpu().tolist()},"timestamp":int(_time.time()*1000)}) + "\n")
+            except Exception:
+                pass
+        # #endregion
         tss_b = max(assigned_scores.sum().item(), 1.0)
         total_target_scores_sum += tss_b
 

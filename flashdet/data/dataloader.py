@@ -147,11 +147,45 @@ def _wrap_dataset_with_augmentations(
     if copy_paste:
         augmenters.append(CopyPaste(extra_image_fn=_random_sample))
 
+    # #region agent log
+    _aug_counter = [0]
+    # #endregion
+
     def _augmented_transform(image, boxes, labels):
+        # #region agent log
+        _aug_counter[0] += 1
+        _pre_shape = image.shape[:2]
+        _pre_nbox = len(boxes)
+        # #endregion
         image, boxes = _resize_to_input(image, boxes, input_size)
+        # #region agent log
+        _post_resize_shape = image.shape[:2]
+        _post_resize_nbox = len(boxes)
+        _augs_applied = []
+        # #endregion
         for aug in augmenters:
             if random.random() < 0.5:
                 image, boxes, labels = aug(image, boxes, labels)
+                # #region agent log
+                _augs_applied.append(type(aug).__name__)
+                # #endregion
+        # #region agent log
+        _pre_train_shape = image.shape[:2]
+        _pre_train_nbox = len(boxes)
+        if _aug_counter[0] <= 5:
+            try:
+                import json as _json, time as _time
+                _dbg_log = "/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/.cursor/debug-387c01.log"
+                _box_range = {}
+                if len(boxes) > 0:
+                    import numpy as _np
+                    _bx = _np.array(boxes) if not isinstance(boxes, _np.ndarray) else boxes
+                    _box_range = {"box_x":[float(_bx[:,0].min()),float(_bx[:,2].max())],"box_y":[float(_bx[:,1].min()),float(_bx[:,3].max())],"box_w":[float((_bx[:,2]-_bx[:,0]).min()),float((_bx[:,2]-_bx[:,0]).max())],"box_h":[float((_bx[:,3]-_bx[:,1]).min()),float((_bx[:,3]-_bx[:,1]).max())]}
+                with open(_dbg_log, "a") as _f:
+                    _f.write(_json.dumps({"sessionId":"387c01","hypothesisId":"H2_transform","location":"dataloader.py:_augmented_transform","message":"augment_pipeline","data":{"sample":_aug_counter[0],"pre_shape":list(_pre_shape),"pre_nbox":_pre_nbox,"post_resize_shape":list(_post_resize_shape),"post_resize_nbox":_post_resize_nbox,"pre_train_shape":list(_pre_train_shape),"pre_train_nbox":_pre_train_nbox,"augs":_augs_applied,"input_size":list(input_size),**_box_range},"timestamp":int(_time.time()*1000)}) + "\n")
+            except Exception:
+                pass
+        # #endregion
         return original_transform(image, boxes, labels)
 
     dataset.transform = _augmented_transform

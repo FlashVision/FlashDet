@@ -8,12 +8,14 @@ the core matching strategy of Deep SORT (Wojke et al., 2017).
 from __future__ import annotations
 
 import numpy as np
-from scipy.stats import chi2
 
 from flashdet.trackers.matching.geometry import xyxy_to_cxywh
 
-# Chi-squared 95% confidence gate for 4-DOF measurement (cx, cy, w, h)
-CHI2_THRESHOLD_95 = chi2.ppf(0.95, df=4)
+try:
+    from scipy.stats import chi2
+    CHI2_THRESHOLD_95 = chi2.ppf(0.95, df=4)
+except ImportError:
+    CHI2_THRESHOLD_95 = 9.487729036781154
 
 
 def mahalanobis_distance(
