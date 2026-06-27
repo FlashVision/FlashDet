@@ -19,7 +19,6 @@ import random
 import cv2
 import numpy as np
 
-import copy
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -28,7 +27,7 @@ from flashdet.cfg import get_config
 from flashdet.models import FlashDet
 from flashdet.models.lora import apply_lora, apply_qlora, merge_lora_weights, get_lora_state_dict
 from flashdet.data import create_dataloader, verify_dataset, verify_training_data
-from flashdet.utils import save_checkpoint, load_checkpoint, save_weights_only, save_inference_weights, setup_logger, AverageMeter
+from flashdet.utils import save_checkpoint, load_checkpoint, save_inference_weights, setup_logger, AverageMeter
 from flashdet.utils.metrics import compute_map
 from flashdet.utils.torchtune_optim import (
     apply_activation_checkpointing,
@@ -40,7 +39,6 @@ from flashdet.utils.torchtune_optim import (
 from flashdet.engine.core.musgd import build_musgd
 
 from flashdet.engine.core.ema import ModelEMA
-from flashdet.analytics.plots import plot_training_curves
 
 
 def _is_main_process():
@@ -119,37 +117,6 @@ def save_visualization(model, images, gt_meta, save_path, epoch, batch_idx, devi
             gt_boxes = np.empty((0, 4))
             gt_labels = np.empty(0)
 
-    # #region agent log
-    try:
-        import json as _json
-        _dbg_log = "/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/workspace/debug-387c01.log"
-        _img_h, _img_w = img_bgr.shape[:2]
-        _box_data = {}
-        if len(gt_boxes) > 0 and hasattr(gt_boxes, 'shape') and gt_boxes.ndim == 2:
-            _oob = int(((gt_boxes[:,2] > _img_w + 5) | (gt_boxes[:,3] > _img_h + 5) | (gt_boxes[:,0] < -5) | (gt_boxes[:,1] < -5)).sum())
-            _box_data = {
-                "num_gt": int(gt_boxes.shape[0]),
-                "img_size": [_img_w, _img_h],
-                "box_x_range": [float(gt_boxes[:,0].min()), float(gt_boxes[:,2].max())],
-                "box_y_range": [float(gt_boxes[:,1].min()), float(gt_boxes[:,3].max())],
-                "box_widths_range": [float((gt_boxes[:,2]-gt_boxes[:,0]).min()), float((gt_boxes[:,2]-gt_boxes[:,0]).max())],
-                "box_heights_range": [float((gt_boxes[:,3]-gt_boxes[:,1]).min()), float((gt_boxes[:,3]-gt_boxes[:,1]).max())],
-                "oob_count": _oob,
-                "first_5_boxes": gt_boxes[:5].tolist() if len(gt_boxes) >= 5 else gt_boxes.tolist(),
-                "labels": gt_labels[:5].tolist() if len(gt_labels) >= 5 else gt_labels.tolist(),
-            }
-        else:
-            _box_data = {"num_gt": 0, "img_size": [_img_w, _img_h]}
-        _pred_data = {"num_pred": len(results[0][0]) if results and len(results) > 0 and results[0][0] is not None and results[0][0].numel() > 0 else 0}
-        if results and len(results) > 0 and results[0][0] is not None and results[0][0].numel() > 0:
-            _d = results[0][0].cpu().numpy()
-            _pred_data["pred_score_range"] = [float(_d[:,4].min()), float(_d[:,4].max())]
-            _pred_data["first_3_pred_boxes"] = _d[:3,:4].tolist()
-        with open(_dbg_log, "a") as _f:
-            _f.write(_json.dumps({"sessionId":"387c01","hypothesisId":"H1_H3","location":"train.py:save_visualization","message":"GT_vs_Pred_state","data":{**_box_data, **_pred_data, "epoch":epoch,"batch_idx":batch_idx},"timestamp":int(__import__('time').time()*1000)}) + "\n")
-    except Exception:
-        pass
-    # #endregion
 
     # Prediction arrays
     pred_boxes = np.empty((0, 4))
@@ -359,35 +326,6 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
                 if len(gt_meta["gt_bboxes"][i]) > 0:
                     gt_meta["gt_bboxes"][i] = gt_meta["gt_bboxes"][i] * scale
 
-        # #region agent log
-        if batch_idx < 3 and epoch == 1:
-            try:
-                import json as _json, time as _time
-                _dbg_log = "/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/workspace/debug-387c01.log"
-                _img_shape = list(images.shape)
-                _gt0 = gt_meta["gt_bboxes"][0]
-                _gl0 = gt_meta["gt_labels"][0]
-                _d = {"batch_idx": batch_idx, "img_shape": _img_shape, "ms_size": current_ms_size}
-                if hasattr(_gt0, '__len__') and len(_gt0) > 0:
-                    _b = np.array(_gt0) if not isinstance(_gt0, np.ndarray) else _gt0
-                    _d["n_gt"] = len(_b)
-                    _d["box_x_range"] = [float(_b[:,0].min()), float(_b[:,2].max())]
-                    _d["box_y_range"] = [float(_b[:,1].min()), float(_b[:,3].max())]
-                    _d["box_w_range"] = [float((_b[:,2]-_b[:,0]).min()), float((_b[:,2]-_b[:,0]).max())]
-                    _d["box_h_range"] = [float((_b[:,3]-_b[:,1]).min()), float((_b[:,3]-_b[:,1]).max())]
-                    _d["first5_boxes"] = _b[:5].tolist()
-                    _d["first5_labels"] = list(_gl0[:5]) if hasattr(_gl0, '__getitem__') else []
-                    _d["img_hw"] = [_img_shape[2], _img_shape[3]]
-                    _oob_x = int((_b[:,2] > _img_shape[3] + 2).sum() + (_b[:,0] < -2).sum())
-                    _oob_y = int((_b[:,3] > _img_shape[2] + 2).sum() + (_b[:,1] < -2).sum())
-                    _d["oob_count"] = _oob_x + _oob_y
-                else:
-                    _d["n_gt"] = 0
-                with open(_dbg_log, "a") as _f:
-                    _f.write(_json.dumps({"sessionId":"387c01","hypothesisId":"H1_H2_H4","location":"train.py:train_loop_pre_forward","message":"GT_boxes_pre_forward","data":_d,"timestamp":int(_time.time()*1000)}) + "\n")
-            except Exception as _e:
-                pass
-        # #endregion
 
         with torch.amp.autocast(device.type, enabled=use_amp):
             output = model(images, gt_meta, epoch=epoch)
@@ -401,18 +339,6 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
         total_batches += 1
         num_pos = loss_states.get("o2m_pos", loss_states.get("num_pos"))
 
-        # #region agent log
-        if batch_idx < 3 and epoch == 1:
-            try:
-                import json as _json, time as _time
-                _dbg_log = "/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/workspace/debug-387c01.log"
-                _ls = {k: (v.item() if hasattr(v,'item') else v) for k, v in loss_states.items()}
-                _ls["total_loss"] = float(output["loss"].mean().item() if output["loss"].dim() > 0 else output["loss"].item())
-                with open(_dbg_log, "a") as _f:
-                    _f.write(_json.dumps({"sessionId":"387c01","hypothesisId":"H4_loss","location":"train.py:post_forward","message":"loss_state","data":{"batch_idx":batch_idx,"loss_states":_ls},"timestamp":int(_time.time()*1000)}) + "\n")
-            except Exception:
-                pass
-        # #endregion
         num_pos_val = num_pos.item() if hasattr(num_pos, "item") else (num_pos or 0)
         if num_pos_val == 0:
             zero_pos_batches += 1
@@ -539,24 +465,6 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None):
 
         results = eval_model.predict(images, None, score_thr=0.01)
 
-        # #region agent log
-        try:
-            import json as _json, time as _time
-            _dbg_log = "/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/workspace/debug-387c01.log"
-            _total_dets = sum(r[0].shape[0] if r[0].numel() > 0 else 0 for r in results)
-            _max_score = max((r[0][:,4].max().item() if r[0].numel() > 0 else 0.0) for r in results)
-            # Also get raw logit stats
-            _em = eval_model
-            _feats = _em.backbone(images)
-            _nf = _em.neck(_feats)
-            _ho = _em.head(_nf, training=False)
-            _raw_cls = _ho['o2o_cls'].sigmoid()
-            _ms, _ = _raw_cls.max(dim=2)
-            with open(_dbg_log, "a") as _f:
-                _f.write(_json.dumps({"sessionId":"387c01","hypothesisId":"H_val_scores","location":"train.py:validate","message":"val_pred_scores","data":{"total_dets":_total_dets,"max_pred_score":_max_score,"raw_sigmoid_max":float(_ms.max()),"raw_sigmoid_mean":float(_ms.mean()),"scores_gt_03":int((_ms>0.3).sum()),"scores_gt_01":int((_ms>0.1).sum()),"n_gt_this_batch":sum(len(gt_meta["gt_bboxes"][i]) for i in range(len(gt_meta["gt_bboxes"])))},"timestamp":int(_time.time()*1000)}) + "\n")
-        except Exception:
-            pass
-        # #endregion
 
         for i, (dets, lbs) in enumerate(results):
             gt_boxes  = gt_meta["gt_bboxes"][i]
@@ -862,14 +770,6 @@ def main():
         logger.info(f"Augmentations: {', '.join(aug_flags)}")
 
     if not args.skip_verify_annotations and is_main:
-        # #region agent log
-        try:
-            import json as _j, time as _t
-            with open("/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/.cursor/debug-8c3ea2.log", "a") as _f:
-                _f.write(_j.dumps({"sessionId": "8c3ea2", "hypothesisId": "H1_H3_H4", "location": "train.py:verify_block", "message": "verify_gate", "data": {"entrypoint": "train.py", "skip_verify": args.skip_verify_annotations, "is_main": is_main, "save_dir": args.save_dir, "gt_verify_dir": os.path.join(args.save_dir, "gt_verification"), "cwd": os.getcwd(), "will_run": True}, "timestamp": int(_t.time() * 1000)}) + "\n")
-        except Exception:
-            pass
-        # #endregion
         ann_ok = verify_training_data(
             train_ann_file=config.data.train_annotations,
             train_img_dir=config.data.train_images,
@@ -973,10 +873,8 @@ def main():
 
 
     # AMP scaler (only on CUDA; GradScaler("cuda", ...) is invalid on CPU)
-    use_amp = False
     scaler = None
     if args.amp and device.type == "cuda":
-        use_amp = True
         scaler = torch.amp.GradScaler("cuda", enabled=True)
         logger.info("AMP: Mixed Precision (FP16) enabled")
     elif args.amp:
@@ -1033,7 +931,7 @@ def main():
     opt_type = getattr(args, "optimizer", "musgd")
     wd = args.weight_decay
     if opt_type == "musgd" and not args.optimizer_in_bwd:
-        logger.info(f"Optimizer: MuSGD")
+        logger.info("Optimizer: MuSGD")
         optimizer = build_musgd(
             raw_model,
             lr=base_lr,
@@ -1041,7 +939,7 @@ def main():
             weight_decay=wd,
         )
     elif opt_type == "sgd" and not args.optimizer_in_bwd:
-        logger.info(f"Optimizer: SGD")
+        logger.info("Optimizer: SGD")
         optimizer = torch.optim.SGD(
             raw_model.parameters(),
             lr=base_lr,
@@ -1141,7 +1039,7 @@ def main():
             for pg in optimizer.param_groups:
                 pg["lr"] = base_lr
             scheduler = torch.optim.lr_scheduler.LambdaLR(
-                optimizer, lr_lambda, last_epoch=start_epoch - 1,
+                optimizer, lf, last_epoch=start_epoch - 1,
             )
         resumed_lr = sync_lr_after_resume(start_epoch)
         logger.info(
@@ -1413,7 +1311,7 @@ def main():
     results_path = os.path.join(args.save_dir, "results.json")
     with open(results_path, "w") as f:
         json.dump(results_summary, f, indent=2)
-    logger.info(f"  - results.json             (training summary)")
+    logger.info("  - results.json             (training summary)")
 
     # Final memory stats
     if device.type == "cuda":
@@ -1424,14 +1322,14 @@ def main():
     logger.info(f"Best mAP@0.5:         {best_map50:.4f}")
     logger.info(f"Best Validation Loss: {best_loss:.4f}")
     logger.info(f"Checkpoints saved to: {args.save_dir}")
-    logger.info(f"  - checkpoint_best.pth      (full training checkpoint)")
-    logger.info(f"  - checkpoint_last.pth      (full training checkpoint)")
-    logger.info(f"  - model_best_inference.pth (inference FP32, no aux_head)")
-    logger.info(f"  - model_best_fp16.pth      (inference FP16, smallest)")
-    logger.info(f"  - model_final_inference.pth (final epoch FP32)")
-    logger.info(f"  - model_final_fp16.pth     (final epoch FP16)")
+    logger.info("  - checkpoint_best.pth      (full training checkpoint)")
+    logger.info("  - checkpoint_last.pth      (full training checkpoint)")
+    logger.info("  - model_best_inference.pth (inference FP32, no aux_head)")
+    logger.info("  - model_best_fp16.pth      (inference FP16, smallest)")
+    logger.info("  - model_final_inference.pth (final epoch FP32)")
+    logger.info("  - model_final_fp16.pth     (final epoch FP16)")
     if args.lora or args.qlora:
-        logger.info(f"  - lora_adapters.pth        (LoRA adapter weights only)")
+        logger.info("  - lora_adapters.pth        (LoRA adapter weights only)")
     if tt_flags:
         logger.info(f"torchtune optimizations used: {', '.join(tt_flags)}")
     logger.info("=" * 60)
