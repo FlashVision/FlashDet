@@ -825,14 +825,20 @@ def main():
         logger.info(f"\nLoading fine-tune weights from: {args.finetune}")
         ckpt = torch.load(args.finetune, map_location=device, weights_only=False)
         src_sd = ckpt.get("model_state_dict", ckpt)
-        # FP16 inference checkpoints: cast back to FP32
         src_sd = {k: v.float() if v.is_floating_point() else v for k, v in src_sd.items()}
+        model_sd = model.state_dict()
+        skipped = []
+        for k in list(src_sd.keys()):
+            if k in model_sd and src_sd[k].shape != model_sd[k].shape:
+                skipped.append(k)
+                del src_sd[k]
         missing, unexpected = model.load_state_dict(src_sd, strict=False)
         loaded = len(src_sd) - len(unexpected)
         logger.info(f"  Loaded {loaded} weight tensors from fine-tune checkpoint")
+        if skipped:
+            logger.info(f"  Skipped {len(skipped)} shape-mismatched keys (num_classes changed): {skipped[:5]}{'...' if len(skipped)>5 else ''}")
         if missing:
             logger.info(f"  Missing keys ({len(missing)}): {missing[:5]}{'...' if len(missing)>5 else ''}")
-            logger.info("  (expected — some keys may differ between training/inference checkpoints)")
         if unexpected:
             logger.warning(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}")
     elif args.finetune and args.resume:
