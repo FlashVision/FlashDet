@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" width="200" alt="FlashDet Logo">
+  <img src="https://raw.githubusercontent.com/FlashVision/FlashDet/main/assets/logo.png" width="200" alt="FlashDet Logo">
 </p>
 
 <h1 align="center">FlashDet</h1>
