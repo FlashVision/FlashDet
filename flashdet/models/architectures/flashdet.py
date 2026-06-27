@@ -126,7 +126,7 @@ class FlashDetPico(nn.Module):
             num_classes=num_classes,
             strides=strides,
             alpha_init=kwargs.get("prog_alpha_init", 0.8),
-            alpha_final=kwargs.get("prog_alpha_final", 0.1),
+            alpha_final=kwargs.get("prog_alpha_final", 0.3),
             o2m_topk=kwargs.get("o2m_topk", 10),
             o2o_topk=kwargs.get("o2o_topk", 7),
             box_weight=kwargs.get("box_weight", 7.5),
