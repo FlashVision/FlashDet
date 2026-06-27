@@ -13,7 +13,7 @@ Reference:
 
 import torch
 from torch.optim import Optimizer
-from typing import Iterable, Dict, Any, List
+from typing import Iterable
 
 
 def _newton_schulz_orthogonalize(

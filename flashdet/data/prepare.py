@@ -879,7 +879,7 @@ def convert_coco_to_txt(
             for c in categories:
                 all_class_names[c["id"]] = c.get("name", f"class_{c['id']}")
 
-        img_lookup = {img["id"]: img for img in data.get("images", [])}
+        {img["id"]: img for img in data.get("images", [])}
         anns_by_image: Dict[int, List] = {}
         for ann in data.get("annotations", []):
             anns_by_image.setdefault(ann["image_id"], []).append(ann)
@@ -987,7 +987,7 @@ def convert_coco_to_voc(
         for c in data.get("categories", []):
             cat_lookup[c["id"]] = c.get("name", f"class_{c['id']}")
 
-        img_lookup = {img["id"]: img for img in data.get("images", [])}
+        {img["id"]: img for img in data.get("images", [])}
         anns_by_image: Dict[int, List] = {}
         for ann in data.get("annotations", []):
             anns_by_image.setdefault(ann["image_id"], []).append(ann)

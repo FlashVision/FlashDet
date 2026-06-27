@@ -7,7 +7,6 @@ YOLO implementations use more sophisticated assignment strategies
 """
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Tuple
 

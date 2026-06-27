@@ -23,10 +23,8 @@ import numpy as np
 from flashdet.trackers.core import KalmanFilter, Track
 from flashdet.trackers.matching import (
     cosine_distance,
-    cxywh_to_xyxy,
     iou_batch,
     linear_assignment,
-    xyxy_to_cxywh,
 )
 
 

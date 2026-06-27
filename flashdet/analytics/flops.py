@@ -155,7 +155,6 @@ class FLOPsCounter:
 
     @staticmethod
     def _conv_flops(module, output) -> int:
-        import torch
         batch = output.shape[0]
         out_channels = output.shape[1]
         spatial = int(np.prod(output.shape[2:]))
@@ -175,7 +174,6 @@ class FLOPsCounter:
 
     @staticmethod
     def _norm_flops(module, output) -> int:
-        import torch
         numel = output.numel()
         return numel * 4  # mean, var, normalize, affine
 
@@ -189,7 +187,6 @@ class FLOPsCounter:
 
     @staticmethod
     def _convtranspose_flops(module, output) -> int:
-        import torch
         batch = output.shape[0]
         out_channels = output.shape[1]
         spatial = int(np.prod(output.shape[2:]))

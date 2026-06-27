@@ -27,8 +27,6 @@ from flashdet.trackers.matching import (
     iou_batch,
     linear_assignment,
     mahalanobis_distance,
-    xyxy_to_cxywh,
-    cxywh_to_xyxy,
 )
 
 

@@ -23,17 +23,13 @@ Usage::
 """
 
 import os
-import copy
-import math
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from flashdet.engine.training.trainer import Trainer, MODEL_SIZE_MAP
-from flashdet.engine.core.ema import ModelEMA
+from flashdet.engine.training.trainer import Trainer
 from flashdet.models import FlashDet
 from flashdet.models.detector import build_model
 from flashdet.utils import AverageMeter

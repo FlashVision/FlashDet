@@ -12,7 +12,6 @@ import numpy as np
 import torch
 
 from flashdet.models.detector import build_model
-from flashdet.registry import DETECTORS
 
 logger = logging.getLogger(__name__)
 

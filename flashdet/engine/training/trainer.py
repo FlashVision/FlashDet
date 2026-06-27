@@ -1,7 +1,6 @@
 """FlashDet Trainer — wraps the full training loop into a reusable class."""
 
 import os
-import copy
 import math
 import json
 import logging
@@ -415,7 +414,7 @@ class Trainer:
         warmup_momentum = 0.8
         base_momentum = 0.937
 
-        self._logger.info(f"\nStarting training...")
+        self._logger.info("\nStarting training...")
         self._logger.info(f"LR schedule: {self.lr} -> {self.lr * lrf} (cosine)")
         self._logger.info(f"Warmup: {nw} iterations ({self.warmup_epochs} epochs)")
         epochs_without_improvement = 0

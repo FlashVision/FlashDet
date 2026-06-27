@@ -18,16 +18,13 @@ Usage::
     trainer.train()
 """
 
-import os
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
 
 from flashdet.engine.training.trainer import Trainer
-from flashdet.utils import AverageMeter
 
 logger = logging.getLogger(__name__)
 
@@ -96,14 +93,14 @@ class ActiveLearningTrainer(Trainer):
             all_results.append(result)
 
             if self.unlabeled_pool and al_round < self.al_rounds - 1:
-                self._logger.info(f"Scoring unlabeled pool for next round...")
+                self._logger.info("Scoring unlabeled pool for next round...")
                 summary = self.get_al_summary()
                 self._logger.info(
                     f"  Strategy: {summary['strategy']}, Budget: {summary['budget_per_round']}"
                 )
                 self._logger.info(
-                    f"  (Note: automatic annotation transfer requires external labeling. "
-                    f"Query indices are logged for manual annotation.)"
+                    "  (Note: automatic annotation transfer requires external labeling. "
+                    "Query indices are logged for manual annotation.)"
                 )
 
         self._logger.info(f"\nActive Learning complete. {len(all_results)} rounds finished.")

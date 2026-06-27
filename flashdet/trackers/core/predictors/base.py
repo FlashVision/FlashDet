@@ -7,7 +7,6 @@ swap prediction strategies without code changes.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import numpy as np
 

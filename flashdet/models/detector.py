@@ -5,7 +5,6 @@ Model builder — registry-based multi-architecture support.
 import logging
 
 from flashdet.models.architectures.flashdet import FlashDet
-import flashdet.models.architectures  # trigger all @DETECTORS registrations
 from flashdet.registry import DETECTORS
 
 logger = logging.getLogger(__name__)

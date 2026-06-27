@@ -11,14 +11,12 @@ All datasets are downloaded into COCO JSON format so they can be used
 directly with FlashDet's training pipeline.
 """
 
-import hashlib
 import json
 import logging
 import os
 import shutil
 import tarfile
 import zipfile
-from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.request import urlretrieve
 from urllib.error import URLError
@@ -378,9 +376,9 @@ def download_dataset(
     verify_dataset(result_dir)
 
     print(f"\nDataset ready at: {os.path.abspath(result_dir)}")
-    print(f"Use for training:")
+    print("Use for training:")
     print(f"  python train.py --train-images {result_dir}/train --val-images {result_dir}/valid")
-    print(f"  # or")
+    print("  # or")
     print(f"  flashdet train --train-images {result_dir}/train --val-images {result_dir}/valid")
 
     return result_dir

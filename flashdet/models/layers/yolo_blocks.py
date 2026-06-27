@@ -15,7 +15,6 @@ License: MIT (same as FlashDet)
 
 import torch
 import torch.nn as nn
-from typing import List
 
 
 class ConvBNSiLU(nn.Module):

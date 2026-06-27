@@ -33,9 +33,9 @@ import torch.nn as nn
 from flashdet.registry import DETECTORS
 from flashdet.models.backbone.flash_backbone import FlashBackbone
 from flashdet.models.neck.pico_neck import PicoNeck
-from flashdet.models.head.e2e_head import E2EDetHead, E2EDualHead
+from flashdet.models.head.e2e_head import E2EDualHead
 from flashdet.losses.e2e_loss import E2EDetectionLoss
-from flashdet.utils.bbox import make_anchor_grid, decode_ltrb, decode_batch_nms_free
+from flashdet.utils.bbox import make_anchor_grid, decode_batch_nms_free
 
 logger = logging.getLogger(__name__)
 
