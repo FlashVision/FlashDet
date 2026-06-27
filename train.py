@@ -119,6 +119,38 @@ def save_visualization(model, images, gt_meta, save_path, epoch, batch_idx, devi
             gt_boxes = np.empty((0, 4))
             gt_labels = np.empty(0)
 
+    # #region agent log
+    try:
+        import json as _json
+        _dbg_log = "/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/.cursor/debug-387c01.log"
+        _img_h, _img_w = img_bgr.shape[:2]
+        _box_data = {}
+        if len(gt_boxes) > 0 and hasattr(gt_boxes, 'shape') and gt_boxes.ndim == 2:
+            _oob = int(((gt_boxes[:,2] > _img_w + 5) | (gt_boxes[:,3] > _img_h + 5) | (gt_boxes[:,0] < -5) | (gt_boxes[:,1] < -5)).sum())
+            _box_data = {
+                "num_gt": int(gt_boxes.shape[0]),
+                "img_size": [_img_w, _img_h],
+                "box_x_range": [float(gt_boxes[:,0].min()), float(gt_boxes[:,2].max())],
+                "box_y_range": [float(gt_boxes[:,1].min()), float(gt_boxes[:,3].max())],
+                "box_widths_range": [float((gt_boxes[:,2]-gt_boxes[:,0]).min()), float((gt_boxes[:,2]-gt_boxes[:,0]).max())],
+                "box_heights_range": [float((gt_boxes[:,3]-gt_boxes[:,1]).min()), float((gt_boxes[:,3]-gt_boxes[:,1]).max())],
+                "oob_count": _oob,
+                "first_5_boxes": gt_boxes[:5].tolist() if len(gt_boxes) >= 5 else gt_boxes.tolist(),
+                "labels": gt_labels[:5].tolist() if len(gt_labels) >= 5 else gt_labels.tolist(),
+            }
+        else:
+            _box_data = {"num_gt": 0, "img_size": [_img_w, _img_h]}
+        _pred_data = {"num_pred": len(results[0][0]) if results and len(results) > 0 and results[0][0] is not None and results[0][0].numel() > 0 else 0}
+        if results and len(results) > 0 and results[0][0] is not None and results[0][0].numel() > 0:
+            _d = results[0][0].cpu().numpy()
+            _pred_data["pred_score_range"] = [float(_d[:,4].min()), float(_d[:,4].max())]
+            _pred_data["first_3_pred_boxes"] = _d[:3,:4].tolist()
+        with open(_dbg_log, "a") as _f:
+            _f.write(_json.dumps({"sessionId":"387c01","hypothesisId":"H1_H3","location":"train.py:save_visualization","message":"GT_vs_Pred_state","data":{**_box_data, **_pred_data, "epoch":epoch,"batch_idx":batch_idx},"timestamp":int(__import__('time').time()*1000)}) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
     # Prediction arrays
     pred_boxes = np.empty((0, 4))
     pred_labels = np.empty(0, dtype=int)
