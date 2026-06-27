@@ -25,13 +25,12 @@ import os
 import copy
 import math
 import logging
-from typing import Optional, List
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from flashdet.engine.core.ema import ModelEMA
 from flashdet.utils import setup_logger, AverageMeter
 
 logger = logging.getLogger(__name__)
@@ -351,6 +350,6 @@ class SSLTrainer:
     def _dequeue_and_enqueue(queue: torch.Tensor, keys: torch.Tensor):
         keys = F.normalize(keys, dim=-1)
         batch_size = keys.shape[0]
-        queue_size = queue.shape[1]
+        queue.shape[1]
         queue[:, batch_size:] = queue[:, :-batch_size].clone()
         queue[:, :batch_size] = keys.T

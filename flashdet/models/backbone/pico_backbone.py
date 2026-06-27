@@ -23,7 +23,7 @@ from typing import List, Tuple
 import torch
 import torch.nn as nn
 
-from flashdet.models.layers.reparam import PicoBlock, StrideDown, MultiScaleConv, FusedDWConv
+from flashdet.models.layers.reparam import PicoBlock, StrideDown
 
 logger = logging.getLogger(__name__)
 

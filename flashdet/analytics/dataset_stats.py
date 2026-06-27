@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -204,7 +204,7 @@ class DatasetAnalyzer:
         self._images = data.get("images", [])
         self._annotations = data.get("annotations", [])
 
-        img_lookup = {img["id"]: img for img in self._images}
+        {img["id"]: img for img in self._images}
         objects_per_img: Dict[int, int] = defaultdict(int)
 
         for img in self._images:
@@ -250,7 +250,7 @@ class DatasetAnalyzer:
                 if len(parts) < 5:
                     continue
                 cls_id = int(parts[0])
-                cx, cy, bw, bh = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+                _cx, _cy, bw, bh = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
                 abs_w = bw * img_w
                 abs_h = bh * img_h
                 self._class_counts[cls_id] += 1

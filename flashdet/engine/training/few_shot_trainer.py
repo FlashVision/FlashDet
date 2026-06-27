@@ -20,17 +20,16 @@ Usage::
 import os
 import math
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from flashdet.engine.training.trainer import Trainer, MODEL_SIZE_MAP
+from flashdet.engine.training.trainer import Trainer
 from flashdet.engine.core.ema import ModelEMA
 from flashdet.models import FlashDet
 from flashdet.models.detector import build_model
-from flashdet.utils import AverageMeter
 
 logger = logging.getLogger(__name__)
 
@@ -169,10 +168,8 @@ class FewShotTrainer(Trainer):
         else:
             optimizer = create_optimizer(model, lr=self.lr, weight_decay=cfg.train.weight_decay)
 
-        from flashdet.engine.core.ema import ModelEMA
         ema = ModelEMA(model, decay=0.9998, warmup=2000)
 
-        import math
         eta_min = 0.00005
         eta_min_factor = eta_min / self.lr
         def lr_lambda(epoch):
@@ -183,7 +180,6 @@ class FewShotTrainer(Trainer):
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
         from flashdet.utils import save_checkpoint, save_inference_weights
-        from flashdet.utils.metrics import compute_map
 
         best_map50 = 0.0
         best_loss = float("inf")
@@ -194,7 +190,7 @@ class FewShotTrainer(Trainer):
             current_lr = optimizer.param_groups[0]["lr"]
             self._logger.info(f"\nEpoch {epoch+1}/{self.epochs} (lr={current_lr:.6f})")
 
-            train_losses = self._train_one_epoch(model, train_loader, optimizer, epoch + 1, ema, None)
+            self._train_one_epoch(model, train_loader, optimizer, epoch + 1, ema, None)
 
             if (epoch + 1) % cfg.train.val_interval == 0:
                 val_loss, map50 = self._validate(model, val_loader, ema, class_names)

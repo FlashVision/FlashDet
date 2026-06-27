@@ -7,7 +7,6 @@ Useful as a lightweight appearance cue when a ReID model is unavailable.
 
 from __future__ import annotations
 
-from typing import Optional
 
 import cv2
 import numpy as np

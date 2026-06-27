@@ -18,7 +18,6 @@ import cv2
 import numpy as np
 
 from flashdet.trackers.core.predictors.base import BasePredictor
-from flashdet.trackers.matching import cxywh_to_xyxy, xyxy_to_cxywh
 
 
 class MedianFlowPredictor(BasePredictor):

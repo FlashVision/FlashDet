@@ -5,7 +5,7 @@ DataLoader utilities for FlashDet detection.
 import random
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-from typing import Optional, Tuple
+from typing import Tuple
 
 from .dataset import FlashDetDataset, collate_fn
 from .transforms import TrainTransform, ValTransform
