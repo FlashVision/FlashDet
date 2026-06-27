@@ -70,15 +70,15 @@ def cmd_check(args):
         errors.append(str(e))
 
     try:
-        from flashdet.engine import Trainer, Predictor, Exporter, Validator  # noqa: F401
-        print(f"  {_colored('✓', 'green')} engine (Trainer, Predictor, Exporter, Validator)")
+        from flashdet.engine import Trainer, Validator  # noqa: F401
+        print(f"  {_colored('✓', 'green')} engine (Trainer, Validator)")
     except ImportError as e:
         print(f"  {_colored('✗', 'red')} engine: {e}")
         errors.append(str(e))
 
     try:
-        from flashdet.trackers import ByteTracker, SORTTracker, BoTSORT  # noqa: F401
-        print(f"  {_colored('✓', 'green')} trackers (ByteTracker, SORT, BoTSORT)")
+        from flashdet.trackers import FlashTracker, MotionTracker, AppearanceTracker  # noqa: F401
+        print(f"  {_colored('✓', 'green')} trackers (FlashTracker, MotionTracker, AppearanceTracker)")
     except ImportError as e:
         print(f"  {_colored('✗', 'red')} trackers: {e}")
         errors.append(str(e))
@@ -154,6 +154,16 @@ def cmd_download(args):
 
 def cmd_train(args):
     """Train a FlashDet model."""
+    if args.seed is not None:
+        import random
+        import numpy as np
+        import torch
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+
     from flashdet.engine.training.trainer import Trainer
 
     if args.config:
@@ -174,7 +184,6 @@ def cmd_train(args):
             "train_images": args.train_images,
             "val_images": args.val_images,
             "save_dir": args.save_dir,
-            "pretrained_coco": args.pretrained_coco,
         }
         if args.lora:
             kwargs["lora"] = True
@@ -197,21 +206,44 @@ def cmd_train(args):
 
 def cmd_predict(args):
     """Run inference on an image, video, or directory."""
-    from flashdet.engine.inference.predictor import Predictor
+    from flashdet.engine.inference import Predictor
 
     predictor = Predictor(
         model_path=args.model,
         device=args.device,
         conf_thresh=args.conf,
+        nms_thresh=args.nms,
+        input_size=args.input_size,
     )
 
-    results = predictor.predict(args.source, output_dir=args.output)
+    results = predictor.predict_image(args.source)
+    if not results:
+        print("No detections found.")
+        return
 
-    if isinstance(results, list) and results and isinstance(results[0], tuple):
-        if len(results[0]) == 6:
-            print(f"\n{_colored(f'Found {len(results)} objects:', 'green')}")
-            for cls, score, x1, y1, x2, y2 in results:
-                print(f"  {cls}: {score:.2f} [{x1},{y1},{x2},{y2}]")
+    for det in results:
+        bbox = det["bbox"]
+        print(f"  {det['class_name']}: {det['confidence']:.2f} "
+              f"[{bbox[0]:.0f}, {bbox[1]:.0f}, {bbox[2]:.0f}, {bbox[3]:.0f}]")
+    print(f"\nTotal: {len(results)} detections")
+
+    if args.output:
+        import os
+        import cv2
+        from pathlib import Path
+        os.makedirs(args.output, exist_ok=True)
+        image = cv2.imread(args.source)
+        if image is not None:
+            for det in results:
+                bbox = det["bbox"]
+                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                label = f"{det['class_name']} {det['confidence']:.2f}"
+                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(image, label, (x1, y1 - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            out_path = os.path.join(args.output, Path(args.source).name)
+            cv2.imwrite(out_path, image)
+            print(f"Saved annotated image to {out_path}")
 
 
 def cmd_val(args):
@@ -221,16 +253,49 @@ def cmd_val(args):
         model_path=args.model,
         val_images=args.val_images,
         device=args.device,
+        conf_thresh=args.conf,
+        nms_thresh=args.nms,
+        input_size=args.input_size,
+        batch_size=args.batch_size,
     )
     validator.validate()
 
 
 def cmd_export(args):
     """Export model to ONNX."""
-    from flashdet.engine.export.exporter import Exporter
-    exporter = Exporter(model_path=args.model)
-    path = exporter.export(output=args.output, simplify=args.simplify)
-    print(f"\n{_colored('✓', 'green')} Exported: {path}")
+    import torch
+    from flashdet.models.detector import build_model
+    from flashdet.cfg import get_config
+
+    model_path = args.model
+    output_path = args.output or model_path.replace(".pth", ".onnx")
+
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+    cfg_data = ckpt.get("config", {})
+    arch = cfg_data.get("architecture", "flashdet")
+    num_classes = cfg_data.get("num_classes", 80)
+    input_size = cfg_data.get("input_size", 640)
+
+    config = get_config(num_classes=num_classes)
+    config.model.architecture = arch
+    if arch in ("yolov9", "yolov10", "yolov11"):
+        config.model.width_mult = cfg_data.get("width_mult", 1.0)
+        config.model.depth_mult = cfg_data.get("depth_mult", 1.0)
+
+    model = build_model(config, architecture=arch)
+    state_dict = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt))
+    model.load_state_dict(state_dict, strict=False)
+    model.eval()
+
+    dummy = torch.randn(1, 3, input_size, input_size)
+    torch.onnx.export(
+        model, dummy, output_path,
+        input_names=["images"],
+        output_names=["output"],
+        opset_version=13,
+        dynamic_axes={"images": {0: "batch"}, "output": {0: "batch"}},
+    )
+    print(f"Exported to {output_path}")
 
 
 def cmd_datasets(args):
@@ -251,9 +316,8 @@ Examples:
   flashdet download --dataset coco2017        Download COCO 2017 dataset
   flashdet download --dataset sample          Download tiny sample for testing
   flashdet train --train-images data/train --val-images data/val
-  flashdet train --config configs/flashdet_m_320_coco.yaml
-  flashdet predict --model best.pth --source photo.jpg
-  flashdet export --model best.pth --output model.onnx --simplify
+  flashdet train --config configs/flashdet_n_320_coco.yaml
+  flashdet train --config configs/yolov10_s_640_coco.yaml
 
 Documentation: https://github.com/FlashVision/FlashDet
 """,
@@ -284,11 +348,11 @@ Documentation: https://github.com/FlashVision/FlashDet
 
     # train
     train_p = subparsers.add_parser("train", help="Train a FlashDet model")
-    train_p.add_argument("--config", default=None, help="Path to YAML config (e.g. configs/flashdet_m_320_coco.yaml)")
-    train_p.add_argument("--model-size", default="m", choices=["m-0.5x", "m", "m-1.5x"],
-                         help="Model variant (default: m)")
+    train_p.add_argument("--config", default=None, help="Path to YAML config (e.g. configs/flashdet_n_320_coco.yaml)")
+    train_p.add_argument("--model-size", default="n", choices=["p", "n", "s", "m", "l", "x"],
+                         help="Model variant (default: n)")
     train_p.add_argument("--architecture", default="flashdet",
-                         choices=["flashdet", "detr", "rt-detr", "yolov9", "yolov10", "yolov11", "grounding-dino"],
+                         choices=["flashdet", "yolov8", "yolov9", "yolov10", "yolov11", "yolox"],
                          help="Detection architecture (default: flashdet)")
     train_p.add_argument("--epochs", type=int, default=100, help="Training epochs (default: 100)")
     train_p.add_argument("--batch-size", type=int, default=32, help="Batch size (default: 32)")
@@ -301,15 +365,17 @@ Documentation: https://github.com/FlashVision/FlashDet
     train_p.add_argument("--lora", action="store_true", help="Enable LoRA fine-tuning")
     train_p.add_argument("--qlora", action="store_true", help="Enable QLoRA fine-tuning")
     train_p.add_argument("--amp", action="store_true", help="Enable mixed precision (FP16)")
-    train_p.add_argument("--pretrained-coco", action="store_true", help="Start from COCO weights")
     train_p.add_argument("--mosaic", action="store_true", help="Enable mosaic augmentation")
     train_p.add_argument("--mixup", action="store_true", help="Enable MixUp augmentation")
+    train_p.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
 
     # predict
     pred_p = subparsers.add_parser("predict", help="Run inference on image/video/directory")
     pred_p.add_argument("--model", required=True, help="Path to .pth checkpoint")
     pred_p.add_argument("--source", required=True, help="Image path, video path, or directory")
     pred_p.add_argument("--conf", type=float, default=0.25, help="Confidence threshold (default: 0.25)")
+    pred_p.add_argument("--nms", type=float, default=0.5, help="NMS IoU threshold (default: 0.5)")
+    pred_p.add_argument("--input-size", type=int, default=640, help="Input size (default: 640)")
     pred_p.add_argument("--device", default="cuda", help="Device (default: cuda)")
     pred_p.add_argument("--output", default=None, help="Output directory for annotated results")
 
@@ -318,6 +384,10 @@ Documentation: https://github.com/FlashVision/FlashDet
     val_p.add_argument("--model", required=True, help="Path to .pth checkpoint")
     val_p.add_argument("--val-images", required=True, help="Path to validation images")
     val_p.add_argument("--device", default="cuda", help="Device (default: cuda)")
+    val_p.add_argument("--conf", type=float, default=0.05, help="Confidence threshold (default: 0.05)")
+    val_p.add_argument("--nms", type=float, default=0.6, help="NMS IoU threshold (default: 0.6)")
+    val_p.add_argument("--input-size", type=int, default=320, help="Input size (default: 320)")
+    val_p.add_argument("--batch-size", type=int, default=32, help="Batch size (default: 32)")
 
     # export
     exp_p = subparsers.add_parser("export", help="Export model to ONNX format")

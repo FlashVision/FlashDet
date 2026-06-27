@@ -109,7 +109,7 @@ class SSLTrainer:
     def __init__(
         self,
         ssl_method: str = "byol",
-        backbone_name: str = "shufflenetv2",
+        backbone_name: str = "LiteBackbone",
         backbone_size: str = "1.0x",
         proj_dim: int = 256,
         queue_size: int = 65536,
@@ -164,8 +164,8 @@ class SSLTrainer:
             if registered_name.lower() == name.lower():
                 return BACKBONES.get(registered_name)()
 
-        from flashdet.models.backbone.shufflenet import ShuffleNetV2
-        return ShuffleNetV2(model_size=self.backbone_size)
+        from flashdet.models.backbone.lite_backbone import LiteBackbone
+        return LiteBackbone(model_size=self.backbone_size)
 
     def _get_backbone_out_dim(self, backbone: nn.Module) -> int:
         """Infer the output feature dimension of the backbone."""

@@ -12,8 +12,8 @@ import torch
 import torch.nn as nn
 
 from flashdet.cfg import get_config
-from flashdet.models import FlashDet, load_coco_pretrained
-from flashdet.models.detector import build_model, ARCHITECTURE_REGISTRY
+from flashdet.models import FlashDet
+from flashdet.models.detector import build_model
 from flashdet.models.lora import (
     apply_lora, apply_qlora, merge_lora_weights, get_lora_state_dict,
 )
@@ -97,7 +97,6 @@ class Trainer:
         input_size: int = 320,
         architecture: str = "flashdet",
         finetune: Optional[str] = None,
-        pretrained_coco: bool = False,
         pretrained_ckpt: Optional[str] = None,
         # Data
         class_file: Optional[str] = None,
@@ -125,7 +124,7 @@ class Trainer:
         qlora: bool = False,
         qlora_dtype: str = "int8",
         # Backbone (Pico only)
-        backbone_type: str = "shufflenet",
+        backbone_type: str = "lite",
         # Augmentations
         mosaic: bool = False,
         mixup: bool = False,
@@ -144,7 +143,6 @@ class Trainer:
         self.model_size = model_size
         self.input_size = (input_size, input_size)
         self.finetune = finetune
-        self.pretrained_coco = pretrained_coco
         self.pretrained_ckpt = pretrained_ckpt
         self.class_file = class_file
         self.train_images = train_images
@@ -157,8 +155,6 @@ class Trainer:
         self.optimizer_in_bwd = optimizer_in_bwd
         self.use_8bit_optimizer = use_8bit_optimizer
         self.compile = compile
-        self.chunked_loss = chunked_loss
-        self.chunk_size = chunk_size
         self.lora = lora
         self.lora_variant = lora_variant
         self.lora_rank = lora_rank
@@ -169,6 +165,8 @@ class Trainer:
         self.qlora_dtype = qlora_dtype
         self.architecture = architecture
         self.backbone_type = backbone_type
+        self.pretrained_coco = False
+        self.val_interval = 1
         self.mosaic = mosaic
         self.mixup = mixup
         self.copy_paste = copy_paste
@@ -336,13 +334,6 @@ class Trainer:
         # Fine-tune / pretrained COCO
         self._load_pretrained(model, cfg)
 
-        # Chunked loss
-        if self.chunked_loss:
-            head = getattr(model, "head", None)
-            if head is not None:
-                head.use_chunked_loss = True
-                head.chunk_size = self.chunk_size
-
         # AMP
         scaler = None
         if self.amp and self.device.type == "cuda":
@@ -376,7 +367,7 @@ class Trainer:
             betas=(0.9, 0.999),
         )
 
-        # LR schedule (Ultralytics style: cosine from lr to lr*lrf)
+        # LR schedule (cosine decay from lr to lr*lrf)
         lrf = getattr(self, 'lrf', 0.01)
 
         def _one_cycle(y1=0.0, y2=1.0, steps=100):
@@ -418,7 +409,7 @@ class Trainer:
             "architecture": self.architecture,
         }
 
-        # Iteration-based warmup (Ultralytics style)
+        # Iteration-based warmup
         nb = len(train_loader)
         nw = max(round(self.warmup_epochs * nb), 100) if self.warmup_epochs > 0 else -1
         warmup_momentum = 0.8
@@ -446,41 +437,43 @@ class Trainer:
 
             epoch_metrics = {"train_loss": train_losses["loss"], "lr": current_lr}
 
-            # Validate every epoch (Ultralytics style)
-            self.callbacks.fire("on_val_start", self)
-            val_loss, map50 = self._validate(
-                raw_model, val_loader, ema, class_names,
-            )
-            epoch_metrics["val_loss"] = val_loss
-            epoch_metrics["val_mAP"] = map50
-            self.callbacks.fire("on_val_end", self, {"val_loss": val_loss, "val_mAP": map50})
-
-            if val_loss < best_loss:
-                best_loss = val_loss
-
-            if map50 > best_map50:
-                best_map50 = map50
-                epochs_without_improvement = 0
-                best_path = os.path.join(self.save_dir, "checkpoint_best.pth")
-                save_checkpoint(
-                    raw_model, optimizer, epoch, val_loss,
-                    best_path,
-                    scheduler=scheduler, config=model_config,
-                    ema=ema,
+            # Validate at configured interval
+            val_interval = getattr(self, "val_interval", 1)
+            if (epoch + 1) % val_interval == 0:
+                self.callbacks.fire("on_val_start", self)
+                val_loss, map50 = self._validate(
+                    raw_model, val_loader, ema, class_names,
                 )
-                save_inference_weights(
-                    ema.ema,
-                    os.path.join(self.save_dir, "model_best_inference.pth"),
-                    config=model_config, half=False,
-                )
-                self._logger.info(f"  Best model saved (mAP@0.5: {best_map50:.4f})")
-                self.callbacks.fire("on_checkpoint", self, best_path, True)
-            else:
-                epochs_without_improvement += 1
+                epoch_metrics["val_loss"] = val_loss
+                epoch_metrics["val_mAP"] = map50
+                self.callbacks.fire("on_val_end", self, {"val_loss": val_loss, "val_mAP": map50})
 
-            if self.patience > 0 and epochs_without_improvement >= self.patience:
-                self._logger.info(f"Early stopping at epoch {epoch + 1} (patience={self.patience})")
-                break
+                if val_loss < best_loss:
+                    best_loss = val_loss
+
+                if map50 > best_map50:
+                    best_map50 = map50
+                    epochs_without_improvement = 0
+                    best_path = os.path.join(self.save_dir, "checkpoint_best.pth")
+                    save_checkpoint(
+                        raw_model, optimizer, epoch, val_loss,
+                        best_path,
+                        scheduler=scheduler, config=model_config,
+                        ema=ema,
+                    )
+                    save_inference_weights(
+                        ema.ema,
+                        os.path.join(self.save_dir, "model_best_inference.pth"),
+                        config=model_config, half=False,
+                    )
+                    self._logger.info(f"  Best model saved (mAP@0.5: {best_map50:.4f})")
+                    self.callbacks.fire("on_checkpoint", self, best_path, True)
+                else:
+                    epochs_without_improvement += 1
+
+                if self.patience > 0 and epochs_without_improvement >= self.patience:
+                    self._logger.info(f"Early stopping at epoch {epoch + 1} (patience={self.patience})")
+                    break
 
             self.callbacks.fire("on_epoch_end", self, epoch + 1, epoch_metrics)
 
@@ -592,21 +585,6 @@ class Trainer:
             src_sd = {k: v.float() if v.is_floating_point() else v for k, v in src_sd.items()}
             model.load_state_dict(src_sd, strict=False)
             self._logger.info(f"Fine-tune weights loaded from: {self.finetune}")
-        elif self.pretrained_coco and not self.resume and not self.finetune:
-            if self._model_cfg["backbone"] == "0.5x":
-                self._logger.warning("COCO pretrained not available for 0.5x model.")
-            else:
-                try:
-                    load_coco_pretrained(
-                        model,
-                        backbone_size=self._model_cfg["backbone"],
-                        fpn_channels=self._model_cfg["fpn_channels"],
-                        input_size=self.input_size[0],
-                        checkpoint_path=self.pretrained_ckpt,
-                    )
-                    self._logger.info("COCO pretrained weights loaded.")
-                except ValueError as e:
-                    self._logger.warning(f"COCO pretrained unavailable: {e}")
 
     def _train_one_epoch(self, model, dataloader, optimizer, epoch, ema, scaler,
                          nb=None, nw=-1, warmup_momentum=0.8, base_momentum=0.937,
@@ -620,7 +598,7 @@ class Trainer:
             nb = len(dataloader)
 
         for batch_idx, (images, gt_meta) in enumerate(dataloader):
-            # Iteration-based warmup (Ultralytics style)
+            # Iteration-based warmup
             ni = batch_idx + nb * epoch
             if ni <= nw:
                 xi = [0, nw]
@@ -638,7 +616,8 @@ class Trainer:
                 output = model(images, gt_meta, epoch=epoch + 1)
                 loss = output["loss"] / self.grad_accum
 
-            if torch.isnan(loss):
+            if torch.isnan(loss).any():
+                optimizer.zero_grad(set_to_none=True)
                 continue
 
             if scaler:

@@ -8,24 +8,16 @@ import numpy as np
 from typing import List, Tuple, Dict
 
 
-# Default class names (PPE dataset)
-CLASS_NAMES = [
-    "Hardhat", "Mask", "NO-Hardhat", "NO-Mask", "NO-Safety Vest",
-    "Person", "Safety Cone", "Safety Vest", "machinery", "vehicle"
-]
+# Fallback class names (overridden by checkpoint config at runtime)
+CLASS_NAMES = [f"class_{i}" for i in range(80)]
 
-# High-contrast colors for each class (BGR format)
+# High-contrast colors for well-known class names (BGR format).
+# Classes not listed here get auto-generated colors via make_color_palette().
 COLORS = {
-    "Hardhat":         (0, 200, 0),
-    "Mask":            (0, 200, 0),
-    "NO-Hardhat":      (0, 0, 230),
-    "NO-Mask":         (0, 0, 230),
-    "NO-Safety Vest":  (0, 0, 230),
-    "Person":          (230, 180, 0),
-    "Safety Cone":     (0, 140, 255),
-    "Safety Vest":     (50, 205, 50),
-    "machinery":       (180, 105, 30),
-    "vehicle":         (200, 0, 200),
+    "person":          (230, 180, 0),
+    "car":             (200, 0, 200),
+    "bicycle":         (50, 205, 50),
+    "dog":             (180, 105, 30),
 }
 
 
@@ -263,27 +255,3 @@ def add_fps_overlay(
     return image
 
 
-def add_violation_warning(
-    image: np.ndarray,
-    num_violations: int,
-    position: Tuple[int, int] = (10, 70)
-) -> np.ndarray:
-    """Add violation warning overlay to image."""
-    if num_violations > 0:
-        cv2.putText(image, f"VIOLATIONS: {num_violations}", position,
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
-    return image
-
-
-def count_violations(detections: List[Tuple]) -> Tuple[List, List]:
-    """Partition detections into (violations, safe)."""
-    violations, safe = [], []
-    for det in detections:
-        if len(det) < 6 and not isinstance(det[0], str):
-            continue
-        name = det[0] if isinstance(det[0], str) else CLASS_NAMES[int(det[5])]
-        if name.startswith("NO-"):
-            violations.append(det)
-        elif name in ("Hardhat", "Mask", "Safety Vest"):
-            safe.append(det)
-    return violations, safe

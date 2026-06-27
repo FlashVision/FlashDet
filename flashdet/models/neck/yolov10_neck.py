@@ -1,4 +1,12 @@
-"""YOLOv10 efficient PANet neck."""
+"""YOLOv10 neck with C2f blocks.
+
+Independent implementation based on:
+    Wang et al., "YOLOv10: Real-Time End-to-End Object Detection",
+    arXiv:2405.14458, 2024.
+
+This is a clean-room implementation. No code copied from AGPL/GPL sources.
+License: MIT (same as FlashDet)
+"""
 
 from typing import List
 
@@ -6,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from flashdet.models.layers import ConvBNSiLU, SCDown, C2f
+from flashdet.models.layers.yolo_blocks import ConvBNSiLU, SCDown, C2f
 
 
 class YOLOv10Neck(nn.Module):

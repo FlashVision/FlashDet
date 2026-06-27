@@ -8,10 +8,11 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from flashdet.trackers.byte_tracker import ByteTracker
+from flashdet.trackers import FlashTracker
+from flashdet.solutions._base import BaseSolution
 
 
-class ObjectCounter:
+class ObjectCounter(BaseSolution):
     """Count objects crossing a defined line.
 
     The line splits the frame into two half-planes.  When a track's centre
@@ -23,8 +24,8 @@ class ObjectCounter:
     predictor : object
         A FlashDet ``Predictor`` (or any callable that accepts an image and
         returns detections as an Nx6 array ``[x1, y1, x2, y2, score, cls]``).
-    tracker : ByteTracker | None
-        Multi-object tracker.  Defaults to a fresh ``ByteTracker()``.
+    tracker : FlashTracker | None
+        Multi-object tracker.  Defaults to a fresh ``FlashTracker()``.
     line_points : list[tuple[int, int]] | None
         Two endpoints ``[(x1, y1), (x2, y2)]`` defining the counting line.
         If *None*, a horizontal line at the vertical midpoint of the first
@@ -36,49 +37,34 @@ class ObjectCounter:
     def __init__(
         self,
         predictor,
-        tracker: Optional[ByteTracker] = None,
+        tracker: Optional[FlashTracker] = None,
         line_points: Optional[List[Tuple[int, int]]] = None,
         classes: Optional[List[int]] = None,
     ):
-        self.predictor = predictor
-        self.tracker = tracker or ByteTracker()
+        super().__init__(predictor, tracker, classes)
+        self._ensure_tracker()
         self.line_points = line_points
-        self.classes = classes
 
         self.in_count: int = 0
         self.out_count: int = 0
         self._track_history: Dict[int, List[Tuple[float, float]]] = defaultdict(list)
         self._side_map: Dict[int, int] = {}
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, int]]:
-        """Process a single video frame.
-
-        Returns
-        -------
-        annotated : np.ndarray
-            Frame with bounding boxes, track IDs and the counting line drawn.
-        counts : dict
-            ``{"in": …, "out": …, "total": …}``
-        """
         if self.line_points is None:
             h = frame.shape[0]
             self.line_points = [(0, h // 2), (frame.shape[1], h // 2)]
 
-        detections = self._run_detector(frame)
+        detections = self._detect(frame)
         tracks = self.tracker.update(detections)
 
         annotated = frame.copy()
 
         for trk in tracks:
             x1, y1, x2, y2, tid, score, cls = trk
-            tid = int(tid)
-            cls = int(cls)
+            tid, cls = int(tid), int(cls)
 
-            if self.classes is not None and cls not in self.classes:
+            if not self._filter_class(cls):
                 continue
 
             cx = (x1 + x2) / 2
@@ -101,7 +87,6 @@ class ObjectCounter:
                 (int(x1), int(y1) - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1,
             )
 
-        # Draw counting line
         pt1, pt2 = self.line_points
         cv2.line(annotated, pt1, pt2, (0, 0, 255), 2)
         cv2.putText(
@@ -120,29 +105,17 @@ class ObjectCounter:
             "total": self.in_count + self.out_count,
         }
 
+    def get_results(self) -> Dict[str, int]:
+        return self.get_counts()
+
     def reset(self):
-        """Reset all counters and track history."""
+        super().reset()
         self.in_count = 0
         self.out_count = 0
         self._track_history.clear()
         self._side_map.clear()
-        self.tracker.reset()
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _run_detector(self, frame: np.ndarray) -> np.ndarray:
-        """Run the predictor and return Nx6 detections."""
-        result = self.predictor(frame)
-        if isinstance(result, np.ndarray):
-            return result
-        if hasattr(result, "detections"):
-            return np.asarray(result.detections, dtype=np.float64)
-        return np.empty((0, 6), dtype=np.float64)
 
     def _point_side(self, px: float, py: float) -> int:
-        """Return +1 / -1 depending on which side of the line the point is."""
         (ax, ay), (bx, by) = self.line_points
         cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
         if cross > 0:

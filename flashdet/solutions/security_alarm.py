@@ -9,7 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from flashdet.trackers.byte_tracker import ByteTracker
+from flashdet.trackers import FlashTracker
+from flashdet.solutions._base import BaseSolution
 
 
 class _IntrusionEvent:
@@ -40,7 +41,7 @@ class _IntrusionEvent:
         }
 
 
-class SecurityAlarm:
+class SecurityAlarm(BaseSolution):
     """Trigger alerts when tracked objects enter restricted zones.
 
     Restricted zones are defined as polygons.  When a track's centre
@@ -51,11 +52,10 @@ class SecurityAlarm:
     ----------
     predictor : object
         FlashDet predictor returning Nx6 detections.
-    tracker : ByteTracker | None
+    tracker : FlashTracker | None
         Multi-object tracker.
     restricted_zones : list[np.ndarray] | None
-        List of polygons (Nx2 int32 arrays).  If *None*, the user must
-        call :meth:`add_zone` before processing frames.
+        List of polygons (Nx2 int32 arrays).
     alert_cooldown : float
         Minimum seconds between alerts for the same (track, zone) pair.
     classes : list[int] | None
@@ -67,17 +67,16 @@ class SecurityAlarm:
     def __init__(
         self,
         predictor,
-        tracker: Optional[ByteTracker] = None,
+        tracker: Optional[FlashTracker] = None,
         restricted_zones: Optional[List[np.ndarray]] = None,
         alert_cooldown: float = 5.0,
         classes: Optional[List[int]] = None,
         max_log_size: int = 1000,
     ):
-        self.predictor = predictor
-        self.tracker = tracker or ByteTracker()
-        self.restricted_zones: List[np.ndarray] = restricted_zones or []
+        super().__init__(predictor, tracker, classes)
+        self._ensure_tracker()
+        self.restricted_zones: List[np.ndarray] = self._normalize_zones(restricted_zones)
         self.alert_cooldown = alert_cooldown
-        self.classes = classes
 
         self._intrusion_log: deque = deque(maxlen=max_log_size)
         self._active_alerts: Dict[Tuple[int, int], _IntrusionEvent] = {}
@@ -85,9 +84,13 @@ class SecurityAlarm:
         self._frame_idx: int = 0
         self._alert_callback: Optional[Any] = None
 
-    # ------------------------------------------------------------------
-    # Zone management
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_zones(zones):
+        if zones is None:
+            return []
+        if isinstance(zones, dict):
+            return [np.asarray(p, dtype=np.int32) for p in zones.values()]
+        return [np.asarray(p, dtype=np.int32) if not isinstance(p, np.ndarray) else p.astype(np.int32) for p in zones]
 
     def add_zone(self, polygon: np.ndarray) -> int:
         """Add a restricted zone. Returns its index."""
@@ -99,23 +102,9 @@ class SecurityAlarm:
         """Register a callback ``fn(event_dict)`` invoked on each new alert."""
         self._alert_callback = callback
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Process one frame and check for intrusions.
-
-        Returns
-        -------
-        annotated : np.ndarray
-            Frame with restricted zones highlighted and intrusion markers.
-        results : dict
-            ``{"active_alerts": […], "intrusion_log": […],
-            "total_intrusions": …}``
-        """
         self._frame_idx += 1
-        detections = self._run_detector(frame)
+        detections = self._detect(frame)
         tracks = self.tracker.update(detections)
 
         annotated = frame.copy()
@@ -127,11 +116,10 @@ class SecurityAlarm:
             x1, y1, x2, y2, tid, score, cls = trk
             tid, cls = int(tid), int(cls)
 
-            if self.classes is not None and cls not in self.classes:
+            if not self._filter_class(cls):
                 continue
 
             cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-
             cv2.rectangle(annotated, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
             for zidx, zone in enumerate(self.restricted_zones):
@@ -153,7 +141,6 @@ class SecurityAlarm:
                             if self._alert_callback is not None:
                                 self._alert_callback(event.to_dict())
 
-                    # visual indicator
                     cv2.circle(annotated, (int(cx), int(cy)), 8, (0, 0, 255), -1)
                     cv2.putText(
                         annotated, "ALERT",
@@ -161,12 +148,10 @@ class SecurityAlarm:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2,
                     )
 
-        # Expire alerts for tracks that left the zone
         expired = [k for k in self._active_alerts if k not in current_zone_tracks]
         for k in expired:
             del self._active_alerts[k]
 
-        # Draw restricted zones
         for zidx, zone in enumerate(self.restricted_zones):
             overlay = annotated.copy()
             has_alert = any(k[1] == zidx for k in self._active_alerts)
@@ -181,7 +166,6 @@ class SecurityAlarm:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
             )
 
-        # Status bar
         n_active = len(self._active_alerts)
         status_color = (0, 0, 255) if n_active > 0 else (0, 200, 0)
         cv2.putText(
@@ -193,7 +177,6 @@ class SecurityAlarm:
         return annotated, self.get_results()
 
     def get_results(self) -> Dict[str, Any]:
-        """Return current alerts and intrusion log."""
         return {
             "active_alerts": [e.to_dict() for e in self._active_alerts.values()],
             "intrusion_log": [e.to_dict() for e in self._intrusion_log],
@@ -201,21 +184,8 @@ class SecurityAlarm:
         }
 
     def reset(self):
-        """Clear all alerts and history."""
+        super().reset()
         self._active_alerts.clear()
         self._intrusion_log.clear()
         self._last_alert_time.clear()
         self._frame_idx = 0
-        self.tracker.reset()
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _run_detector(self, frame: np.ndarray) -> np.ndarray:
-        result = self.predictor(frame)
-        if isinstance(result, np.ndarray):
-            return result
-        if hasattr(result, "detections"):
-            return np.asarray(result.detections, dtype=np.float64)
-        return np.empty((0, 6), dtype=np.float64)

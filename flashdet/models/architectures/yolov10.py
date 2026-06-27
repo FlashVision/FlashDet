@@ -1,13 +1,15 @@
 """
 YOLOv10 — NMS-Free Real-Time End-to-End Object Detection.
 
-Key innovations:
-  - Dual label assignment: one-to-many for training, one-to-one for inference
-  - Consistent dual assignment for NMS-free end-to-end detection
-  - Efficiency-driven model design with spatial-channel decoupled downsampling
+Independent implementation based on:
+    Wang et al., "YOLOv10: Real-Time End-to-End Object Detection",
+    arXiv:2405.14458, 2024.
+    Original research code: https://github.com/THU-MIG/yolov10 (Apache-2.0)
 
-Reference:
-    Wang et al., "YOLOv10: Real-Time End-to-End Object Detection", 2024.
+This is a clean-room implementation based on the paper's architectural
+description. No code was copied from AGPL-licensed repositories.
+
+License: MIT (same as FlashDet)
 """
 
 import logging
@@ -99,12 +101,15 @@ class YOLOv10(nn.Module):
         score_thr: float = 0.05,
         nms_thr: float = 0.6,
     ) -> list:
-        """Run inference and return ``[(dets, labels), ...]`` per image."""
+        """Run NMS-free inference using o2o heads. Returns [(dets, labels), ...]."""
         self.eval()
-        out = self.forward(x)
+        features = self.backbone(x)
+        neck_feats = self.neck(features)
+        # Use o2o heads for NMS-free inference (paper design)
+        o2o_preds = [h(f) for h, f in zip(self.o2o_heads, neck_feats)]
         from flashdet.engine.inference.postprocess import decode_yolo_predictions
         return decode_yolo_predictions(
-            out["preds"], self.num_classes, x.shape[2:],
+            o2o_preds, self.num_classes, x.shape[2:],
             reg_max=self.reg_max, score_thr=score_thr, nms_thr=nms_thr,
         )
 

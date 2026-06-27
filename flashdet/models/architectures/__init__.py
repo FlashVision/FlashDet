@@ -1,17 +1,17 @@
-from .flashdet import FlashDet
-from .detr import DETR
-from .rt_detr import RTDETR
+from .flashdet import FlashDet, FlashDetPico, SIZE_CONFIGS
+from .yolov8 import YOLOv8
 from .yolov9 import YOLOv9
 from .yolov10 import YOLOv10
 from .yolov11 import YOLOv11
-from .grounding_dino import GroundingDINO
+from .yolox import YOLOX
 
 __all__ = [
     "FlashDet",
-    "DETR",
-    "RTDETR",
+    "FlashDetPico",
+    "SIZE_CONFIGS",
+    "YOLOv8",
     "YOLOv9",
     "YOLOv10",
     "YOLOv11",
-    "GroundingDINO",
+    "YOLOX",
 ]

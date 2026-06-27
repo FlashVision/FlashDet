@@ -129,11 +129,10 @@ def save_inference_weights(
     """
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     
-    # Get state dict and filter out training-only components (aux_head, aux_fpn)
     state_dict = model.state_dict()
     inference_state_dict = {
         k: v for k, v in state_dict.items()
-        if not k.startswith("aux_head.") and not k.startswith("aux_fpn.")
+        if not k.startswith("aux_head.")
     }
     
     # Convert to FP16 if requested

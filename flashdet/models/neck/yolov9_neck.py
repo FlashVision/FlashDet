@@ -1,4 +1,12 @@
-"""YOLOv9 PANet-style FPN neck."""
+"""YOLOv9 PANet-style FPN neck.
+
+Independent implementation based on:
+    Wang et al., "YOLOv9: Learning What You Want to Learn Using
+    Programmable Gradient Information", arXiv:2402.13616, 2024.
+
+This is a clean-room implementation. No code copied from AGPL/GPL sources.
+License: MIT (same as FlashDet)
+"""
 
 from typing import List
 
@@ -6,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from flashdet.models.layers import ConvBNSiLU, GELAN
+from flashdet.models.layers.yolo_blocks import ConvBNSiLU, GELAN
 
 
 class YOLOv9Neck(nn.Module):

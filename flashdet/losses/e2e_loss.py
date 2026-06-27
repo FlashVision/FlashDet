@@ -1,5 +1,5 @@
 """
-End-to-End Detection Loss with Progressive Loss (ProgLoss) for YOLO26-based FlashDet.
+End-to-End Detection Loss with Progressive Loss (ProgLoss) for FlashDet.
 
 DFL-free: box regression uses direct 4-value LTRB prediction (no distribution).
 Loss components per head:
@@ -10,62 +10,19 @@ Loss components per head:
 ProgLoss linearly shifts emphasis from the one-to-many head to the
 one-to-one head over training:
     L_total = alpha(t) * L_o2m + (1 - alpha(t)) * L_o2o
-
-Reference:
-    Ultralytics YOLO26 (2026), Sections 3.2.2, 3.3.2.
 """
 
-import math
 import torch
 import torch.nn.functional as F
 from typing import Dict, List, Tuple, Optional
 
-from flashdet.models.assignment.stal import STALAssigner, _bbox_iou_aligned
+from flashdet.utils.bbox import make_anchor_grid, decode_ltrb, bbox_iou_aligned
+from flashdet.models.assignment.stal import STALAssigner
 
-
-def _make_anchor_grid(
-    feat_sizes: List[Tuple[int, int]],
-    strides: List[int],
-    device: torch.device,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Build anchor center grid and stride tensor for all FPN levels.
-
-    Returns:
-        anchor_centers: [total_anchors, 2] (x, y) in pixel space.
-        anchor_strides: [total_anchors, 1] stride per anchor.
-    """
-    centers_list = []
-    strides_list = []
-    for (h, w), stride in zip(feat_sizes, strides):
-        shift_x = (torch.arange(w, device=device) + 0.5) * stride
-        shift_y = (torch.arange(h, device=device) + 0.5) * stride
-        yy, xx = torch.meshgrid(shift_y, shift_x, indexing="ij")
-        centers_list.append(torch.stack([xx.reshape(-1), yy.reshape(-1)], dim=-1))
-        strides_list.append(torch.full((h * w, 1), stride, device=device, dtype=torch.float32))
-    return torch.cat(centers_list, dim=0), torch.cat(strides_list, dim=0)
-
-
-def _decode_ltrb(
-    anchor_centers: torch.Tensor,
-    anchor_strides: torch.Tensor,
-    reg_pred: torch.Tensor,
-) -> torch.Tensor:
-    """Decode LTRB distances to xyxy boxes.
-
-    Args:
-        anchor_centers: [N, 2]
-        anchor_strides: [N, 1]
-        reg_pred: [N, 4] raw regression output (will be exponentiated * stride).
-
-    Returns:
-        decoded_bboxes: [N, 4] in xyxy format.
-    """
-    ltrb = F.softplus(reg_pred, beta=1.0) * anchor_strides  # [N, 4]
-    x1 = anchor_centers[:, 0] - ltrb[:, 0]
-    y1 = anchor_centers[:, 1] - ltrb[:, 1]
-    x2 = anchor_centers[:, 0] + ltrb[:, 2]
-    y2 = anchor_centers[:, 1] + ltrb[:, 3]
-    return torch.stack([x1, y1, x2, y2], dim=-1)
+# Keep backward-compatible aliases for any external code importing private names
+_make_anchor_grid = make_anchor_grid
+_decode_ltrb = decode_ltrb
+_bbox_iou_aligned = bbox_iou_aligned
 
 
 def _compute_branch_loss(
@@ -84,7 +41,7 @@ def _compute_branch_loss(
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """Compute detection loss for a single branch (o2o or o2m).
 
-    Matches Ultralytics v8DetectionLoss:
+    Loss computation per head:
       - Plain BCE (no focal) for classification
       - Box/L1 losses weighted by target_score per positive
       - All losses normalized by target_scores_sum (sum of soft labels)
@@ -101,7 +58,7 @@ def _compute_branch_loss(
         cls_pred_b = cls_preds[b]        # [N, num_classes]
         reg_pred_b = reg_preds[b]        # [N, 4]
 
-        decoded_bboxes = _decode_ltrb(anchor_centers, anchor_strides, reg_pred_b)
+        decoded_bboxes = decode_ltrb(anchor_centers, anchor_strides, reg_pred_b)
         cls_scores = cls_pred_b.sigmoid()
 
         gt_bboxes = gt_bboxes_list[b]
@@ -121,46 +78,26 @@ def _compute_branch_loss(
         tss_b = max(assigned_scores.sum().item(), 1.0)
         total_target_scores_sum += tss_b
 
-        # Plain BCE — matches Ultralytics v8DetectionLoss (no focal loss)
+        # Plain BCE (no focal loss)
         bce = F.binary_cross_entropy_with_logits(
             cls_pred_b, assigned_scores, reduction="none"
         )
         total_cls_loss = total_cls_loss + bce.sum()
 
-        # #region agent log
-        if b == 0 and not hasattr(assigner, '_dbg_logged'):
-            import os as _os, json as _json, time as _time
-            _lp = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))), "debug-387c01.log")
-            try:
-                with open(_lp, "a") as _f:
-                    _f.write(_json.dumps({"sessionId":"387c01","hypothesisId":"B_C_postfix","location":"e2e_loss.py:branch_loss","message":"cls_loss_plain_bce","data":{"branch":"o2o" if assigner.one_to_one else "o2m","n_pos":n_pos,"bce_sum":round(bce.sum().item(),2),"target_scores_sum":round(tss_b,4),"target_score_pos_max":round(assigned_scores[fg_mask].max().item(),4) if n_pos>0 else 0},"timestamp":int(_time.time()*1000)}) + "\n")
-            except: pass
-        # #endregion
 
         if n_pos > 0:
             pos_decoded = decoded_bboxes[fg_mask]   # [n_pos, 4]
             pos_target = assigned_bboxes[fg_mask]   # [n_pos, 4]
             pos_reg = reg_pred_b[fg_mask]           # [n_pos, 4]
 
-            # Score-weighted box loss — matches Ultralytics BboxLoss
+            # Score-weighted box loss
             score_weight = assigned_scores.sum(-1)[fg_mask].unsqueeze(-1)  # [n_pos, 1]
-            ciou = _bbox_iou_aligned(pos_decoded, pos_target)
+            ciou = bbox_iou_aligned(pos_decoded, pos_target)
             box_loss = ((1 - ciou).clamp(min=0).unsqueeze(-1) * score_weight).sum()
             total_box_loss = total_box_loss + box_loss
 
-            # #region agent log
-            if b == 0 and not hasattr(assigner, '_dbg_logged'):
-                import os as _os2, json as _json2, time as _time2
-                _lp2 = _os2.path.join(_os2.path.dirname(_os2.path.dirname(_os2.path.dirname(_os2.path.abspath(__file__)))), "debug-387c01.log")
-                try:
-                    with open(_lp2, "a") as _f2:
-                        _f2.write(_json2.dumps({"sessionId":"387c01","hypothesisId":"D_postfix","location":"e2e_loss.py:box_loss","message":"box_loss_weighted","data":{"branch":"o2o" if assigner.one_to_one else "o2m","n_pos":n_pos,"ciou_mean":round(ciou.mean().item(),4),"box_loss_weighted":round(box_loss.item(),4),"score_weight_mean":round(score_weight.mean().item(),4)},"timestamp":int(_time2.time()*1000)}) + "\n")
-                except: pass
-                assigner._dbg_logged = True
-            # #endregion
 
-            # Score-weighted L1 loss — matches Ultralytics BboxLoss no-DFL path
-            # Reference normalizes by image size: ltrb * stride / imgsz
+            # Score-weighted L1 loss (normalized by image size: ltrb * stride / imgsz)
             pos_centers = anchor_centers[fg_mask]    # [n_pos, 2]
             pos_strides = anchor_strides[fg_mask]    # [n_pos, 1]
             img_h, img_w = img_size
@@ -179,24 +116,13 @@ def _compute_branch_loss(
             l1_loss = (l1_per_pos * score_weight).sum()
             total_l1_loss = total_l1_loss + l1_loss
 
-    # Normalize by target_scores_sum — matches Ultralytics v8DetectionLoss
+    # Normalize by target_scores_sum
     tss = max(total_target_scores_sum, 1.0)
     loss_cls = cls_weight * total_cls_loss / tss
     loss_box = box_weight * total_box_loss / tss
     loss_l1 = l1_weight * total_l1_loss / tss
 
     total = loss_cls + loss_box + loss_l1
-
-    # #region agent log
-    import os as _os3, json as _json3, time as _time3
-    _lp3 = _os3.path.join(_os3.path.dirname(_os3.path.dirname(_os3.path.dirname(_os3.path.abspath(__file__)))), "debug-387c01.log")
-    if not hasattr(assigner, '_dbg_branch_logged'):
-        assigner._dbg_branch_logged = True
-        try:
-            with open(_lp3, "a") as _f3:
-                _f3.write(_json3.dumps({"sessionId":"387c01","hypothesisId":"G_H","location":"e2e_loss.py:branch_summary","message":"loss_components_and_labels","data":{"branch":"o2o" if assigner.one_to_one else "o2m","cls_loss":round(loss_cls.item(),6),"box_loss":round(loss_box.item(),6),"l1_loss":round(loss_l1.item(),6),"l1_raw_sum":round(total_l1_loss.item(),4),"cls_raw_sum":round(total_cls_loss.item(),4),"box_raw_sum":round(total_box_loss.item(),4),"tss":round(tss,4),"total":round(total.item(),4),"cls_weight":cls_weight,"box_weight":box_weight,"l1_weight":l1_weight},"timestamp":int(_time3.time()*1000)}) + "\n")
-        except: pass
-    # #endregion
 
     return total, {
         "loss_cls": loss_cls.detach(),
@@ -248,10 +174,9 @@ class E2EDetectionLoss:
         self.o2o_assigner = STALAssigner(topk=o2o_topk, strides=strides, one_to_one=True)
 
     def prog_alpha(self, epoch: int, total_epochs: int) -> float:
-        """Compute ProgLoss alpha — per-EPOCH decay matching YOLO26 E2ELoss.
+        """Compute ProgLoss alpha — per-epoch linear decay.
 
-        YOLO26's ``E2ELoss.update()`` is called once per epoch by the
-        Ultralytics trainer (trainer.py line 510). The decay function is::
+        Called once per epoch. The decay function is::
 
             decay(x) = max(1 - x/(epochs-1), 0) * (o2m_init - final_o2m) + final_o2m
 
@@ -293,7 +218,7 @@ class E2EDetectionLoss:
             total_loss, loss_states dict.
         """
         device = o2o_cls.device
-        anchor_centers, anchor_strides = _make_anchor_grid(
+        anchor_centers, anchor_strides = make_anchor_grid(
             feat_sizes, list(self.strides), device
         )
 
@@ -323,22 +248,9 @@ class E2EDetectionLoss:
         # ProgLoss: weighted combination
         B = o2o_cls.shape[0]
         total_per_sample = alpha * o2m_loss + (1 - alpha) * o2o_loss
-        # Scale by batch_size — matches Ultralytics v8DetectionLoss.loss()
-        # which returns `loss * batch_size`. This ensures gradient magnitude
+        # Scale by batch_size so gradient magnitude
         # scales properly with batch size (linear scaling rule).
         total = total_per_sample * B
-
-        # #region agent log
-        import os as _os, json as _json, time as _time
-        _lp = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))), "debug-387c01.log")
-        if not hasattr(self, '_log_counter'): self._log_counter = 0
-        self._log_counter += 1
-        if self._log_counter <= 10 or self._log_counter % 50 == 0:
-            try:
-                with open(_lp, "a") as _f:
-                    _f.write(_json.dumps({"sessionId":"387c01","hypothesisId":"F","location":"e2e_loss.py:__call__","message":"batch_size_scaling","data":{"call_count":self._log_counter,"batch_size":B,"total_raw":round(total.item(),4),"total_scaled_by_B":round((total*B).item(),4),"o2m_loss":round(o2m_loss.item(),4),"o2o_loss":round(o2o_loss.item(),4),"o2m_cls":round(o2m_states["loss_cls"].item(),4),"o2m_box":round(o2m_states["loss_box"].item(),4),"o2m_l1":round(o2m_states["loss_l1"].item(),4),"o2o_cls":round(o2o_states["loss_cls"].item(),4),"o2o_box":round(o2o_states["loss_box"].item(),4),"o2o_l1":round(o2o_states["loss_l1"].item(),4),"alpha":round(alpha,4),"epoch":epoch},"timestamp":int(_time.time()*1000)}) + "\n")
-            except: pass
-        # #endregion
 
         states = {
             "loss_total": total_per_sample.detach(),

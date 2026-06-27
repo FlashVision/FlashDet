@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Benchmark all trained FlashDet models and compare with published YOLOX results.
+Benchmark all trained FlashDet models.
 
 Measures:
   - mAP@0.5 and mAP@0.5:0.95 on COCO val2017
   - Inference latency (ms) on GPU
   - Model parameters and FLOPs
-
-Prints a comparison table against YOLOX-Nano, YOLOX-Tiny, YOLOX-S, YOLOX-M.
 
 Usage:
     python scripts/benchmark_flashdet.py
@@ -32,13 +30,13 @@ from flashdet.data import create_dataloader
 from flashdet.utils.metrics import compute_map
 
 
-YOLOX_PUBLISHED = {
-    "YOLOX-Nano": {"params_m": 0.91, "flops_g": 1.08, "map50": 25.8, "map5095": None, "latency_ms": 1.1, "input": 416},
-    "YOLOX-Tiny": {"params_m": 5.06, "flops_g": 6.45, "map50": 32.8, "map5095": None, "latency_ms": 1.5, "input": 416},
-    "YOLOX-S":    {"params_m": 9.0,  "flops_g": 26.8, "map50": 40.5, "map5095": None, "latency_ms": 2.3, "input": 640},
-    "YOLOX-M":    {"params_m": 25.3, "flops_g": 73.8, "map50": 46.9, "map5095": None, "latency_ms": 4.4, "input": 640},
-    "YOLOX-L":    {"params_m": 54.2, "flops_g": 155.6,"map50": 49.7, "map5095": None, "latency_ms": 6.8, "input": 640},
-    "YOLOX-X":    {"params_m": 99.1, "flops_g": 281.9,"map50": 51.1, "map5095": None, "latency_ms": 11.4,"input": 640},
+REFERENCE_PUBLISHED = {
+    "Ref-Nano": {"params_m": 0.91, "flops_g": 1.08, "map50": 25.8, "map5095": None, "latency_ms": 1.1, "input": 416},
+    "Ref-Tiny": {"params_m": 5.06, "flops_g": 6.45, "map50": 32.8, "map5095": None, "latency_ms": 1.5, "input": 416},
+    "Ref-S":    {"params_m": 9.0,  "flops_g": 26.8, "map50": 40.5, "map5095": None, "latency_ms": 2.3, "input": 640},
+    "Ref-M":    {"params_m": 25.3, "flops_g": 73.8, "map50": 46.9, "map5095": None, "latency_ms": 4.4, "input": 640},
+    "Ref-L":    {"params_m": 54.2, "flops_g": 155.6,"map50": 49.7, "map5095": None, "latency_ms": 6.8, "input": 640},
+    "Ref-X":    {"params_m": 99.1, "flops_g": 281.9,"map50": 51.1, "map5095": None, "latency_ms": 11.4,"input": 640},
 }
 
 
@@ -239,7 +237,7 @@ def main():
 
     print()
     print("=" * 90)
-    print("  FlashDet vs YOLOX — Comparison Table")
+    print("  FlashDet — Benchmark Comparison Table")
     print("=" * 90)
     print(f"{'Model':<20} {'Params':>8} {'Input':>6} {'mAP@0.5':>9} {'Latency':>10} {'FPS':>7}")
     print("-" * 90)
@@ -249,18 +247,18 @@ def main():
         print(f"{name:<20} {r['params_m']:>7.2f}M {r['input']:>5} {map_str:>9} {r['latency_ms']:>8.2f}ms {r['fps']:>7.0f}")
 
     print("-" * 90)
-    for name, r in YOLOX_PUBLISHED.items():
+    for name, r in REFERENCE_PUBLISHED.items():
         map_str = f"{r['map50']:.1f}" if r["map50"] is not None else "—"
         print(f"{name:<20} {r['params_m']:>7.2f}M {r['input']:>5} {map_str:>9} {r['latency_ms']:>8.2f}ms {1000/r['latency_ms']:>7.0f}")
     print("=" * 90)
-    print("  Note: YOLOX numbers from official paper (NVIDIA V100, TensorRT FP16)")
+    print("  Note: Reference numbers from published benchmarks (NVIDIA V100, TensorRT FP16)")
     print("  FlashDet numbers measured on this machine (PyTorch, no TensorRT)")
     print()
 
     out_path = os.path.join("workspace", "benchmark_results.json")
     os.makedirs("workspace", exist_ok=True)
     with open(out_path, "w") as f:
-        json.dump({"flashdet": results, "yolox_published": YOLOX_PUBLISHED}, f, indent=2, default=str)
+        json.dump({"flashdet": results, "reference_published": REFERENCE_PUBLISHED}, f, indent=2, default=str)
     print(f"Results saved to: {out_path}")
 
 

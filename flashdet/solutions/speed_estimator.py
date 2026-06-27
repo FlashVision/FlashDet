@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from flashdet.trackers.byte_tracker import ByteTracker
+from flashdet.trackers import FlashTracker
+from flashdet.solutions._base import BaseSolution
 
 
-class SpeedEstimator:
+class SpeedEstimator(BaseSolution):
     """Estimate object speed (px/frame or real-world units) from track history.
 
     Speed is computed as the Euclidean displacement of a track's centre over a
@@ -22,7 +23,7 @@ class SpeedEstimator:
     ----------
     predictor : object
         FlashDet predictor returning Nx6 detections.
-    tracker : ByteTracker | None
+    tracker : FlashTracker | None
         Multi-object tracker.
     pixels_per_meter : float
         Calibration factor.  Set to 1.0 to get speed in px/frame.
@@ -37,38 +38,23 @@ class SpeedEstimator:
     def __init__(
         self,
         predictor,
-        tracker: Optional[ByteTracker] = None,
+        tracker: Optional[FlashTracker] = None,
         pixels_per_meter: float = 1.0,
         fps: float = 30.0,
         window: int = 10,
         classes: Optional[List[int]] = None,
     ):
-        self.predictor = predictor
-        self.tracker = tracker or ByteTracker()
+        super().__init__(predictor, tracker, classes)
+        self._ensure_tracker()
         self.pixels_per_meter = pixels_per_meter
         self.fps = fps
         self.window = window
-        self.classes = classes
 
         self._track_history: Dict[int, deque] = defaultdict(lambda: deque(maxlen=window))
         self._speeds: Dict[int, float] = {}
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[int, float]]:
-        """Process one frame.
-
-        Returns
-        -------
-        annotated : np.ndarray
-            Frame with speed labels overlaid.
-        speeds : dict[int, float]
-            Mapping ``{track_id: speed}`` — speed in km/h when calibrated,
-            otherwise px/frame.
-        """
-        detections = self._run_detector(frame)
+        detections = self._detect(frame)
         tracks = self.tracker.update(detections)
 
         annotated = frame.copy()
@@ -76,10 +62,9 @@ class SpeedEstimator:
 
         for trk in tracks:
             x1, y1, x2, y2, tid, score, cls = trk
-            tid = int(tid)
-            cls = int(cls)
+            tid, cls = int(tid), int(cls)
 
-            if self.classes is not None and cls not in self.classes:
+            if not self._filter_class(cls):
                 continue
 
             cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
@@ -107,23 +92,13 @@ class SpeedEstimator:
         """Return the latest speed for every tracked object."""
         return dict(self._speeds)
 
+    def get_results(self) -> Dict[str, Any]:
+        return {"speeds": self.get_speeds()}
+
     def reset(self):
-        """Reset track history and speed cache."""
+        super().reset()
         self._track_history.clear()
         self._speeds.clear()
-        self.tracker.reset()
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _run_detector(self, frame: np.ndarray) -> np.ndarray:
-        result = self.predictor(frame)
-        if isinstance(result, np.ndarray):
-            return result
-        if hasattr(result, "detections"):
-            return np.asarray(result.detections, dtype=np.float64)
-        return np.empty((0, 6), dtype=np.float64)
 
     def _compute_speed(self, history: deque) -> float:
         if len(history) < 2:
@@ -141,4 +116,4 @@ class SpeedEstimator:
         if time_s == 0:
             return 0.0
         speed_mps = dist_m / time_s
-        return speed_mps * 3.6  # m/s → km/h
+        return speed_mps * 3.6  # m/s -> km/h

@@ -11,7 +11,7 @@ pip install flashdet
 ```bash
 pip install "flashdet[all]"       # Everything
 pip install "flashdet[export]"    # ONNX export
-pip install "flashdet[tracker]"   # ByteTracker, SORT, BoTSORT
+pip install "flashdet[tracker]"   # FlashTracker, MotionTracker, AppearanceTracker
 pip install "flashdet[solutions]" # Counting, speed, heatmaps
 pip install "flashdet[analytics]" # Benchmarking, plots
 ```

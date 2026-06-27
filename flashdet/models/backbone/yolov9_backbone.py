@@ -1,11 +1,19 @@
-"""YOLOv9 backbone — GELAN-based feature extractor."""
+"""YOLOv9 backbone — GELAN-based feature extractor.
+
+Independent implementation based on:
+    Wang et al., "YOLOv9: Learning What You Want to Learn Using
+    Programmable Gradient Information", arXiv:2402.13616, 2024.
+
+This is a clean-room implementation. No code copied from AGPL/GPL sources.
+License: MIT (same as FlashDet)
+"""
 
 from typing import List
 
 import torch
 import torch.nn as nn
 
-from flashdet.models.layers import ConvBNSiLU, DownSample, GELAN
+from flashdet.models.layers.yolo_blocks import ConvBNSiLU, DownSample, GELAN
 
 
 class YOLOv9Backbone(nn.Module):

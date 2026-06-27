@@ -14,7 +14,7 @@ Usage:
     # MoCo pretraining with custom backbone
     python scripts/train_ssl.py \
         --ssl-method moco \
-        --backbone shufflenetv2 \
+        --backbone LiteBackbone \
         --train-images path/to/unlabeled/images
 
     # Then fine-tune on labeled data
@@ -41,7 +41,7 @@ def parse_args():
                         help="Path to directory of unlabeled training images")
     parser.add_argument("--ssl-method", default="byol", choices=["byol", "moco", "simclr"],
                         help="SSL method")
-    parser.add_argument("--backbone", default="shufflenetv2",
+    parser.add_argument("--backbone", default="LiteBackbone",
                         help="Backbone architecture to pretrain")
     parser.add_argument("--backbone-size", default="1.0x",
                         help="Backbone size variant")

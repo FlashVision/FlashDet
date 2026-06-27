@@ -1,5 +1,5 @@
 """
-Data augmentation transforms for PPE detection.
+Data augmentation transforms for object detection.
 
 Training uses a full homography pipeline (matching official FlashDet):
   - All spatial augmentations (scale, flip, perspective, rotation, shear,
