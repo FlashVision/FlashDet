@@ -4,16 +4,16 @@
 
 | Tracker | Method | Best For |
 |---------|--------|----------|
-| ByteTracker | IoU + Kalman filter | General purpose |
-| SORTTracker | Kalman + Hungarian | Speed-critical |
-| BoTSORT | Appearance + motion | Crowded scenes |
+| FlashTracker | IoU + Kalman filter | General purpose |
+| MotionTracker | Kalman + Hungarian matching | Speed-critical |
+| AppearanceTracker | Appearance + motion fusion | Crowded scenes |
 
 ## Usage
 
 ```python
-from flashdet.trackers import ByteTracker
+from flashdet.trackers import FlashTracker
 
-tracker = ByteTracker(max_age=30, min_hits=3, iou_threshold=0.3)
+tracker = FlashTracker(max_age=30, min_hits=3, iou_threshold=0.3)
 
 # Per frame
 tracks = tracker.update(detections)  # [x1,y1,x2,y2,track_id,score,cls]

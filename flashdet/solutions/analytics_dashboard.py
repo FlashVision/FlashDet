@@ -8,10 +8,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from flashdet.trackers.byte_tracker import ByteTracker
+from flashdet.trackers import FlashTracker
+from flashdet.solutions._base import BaseSolution
 
 
-class AnalyticsDashboard:
+class AnalyticsDashboard(BaseSolution):
     """Aggregate per-frame detection statistics and generate reports.
 
     Tracks detections per frame, per-class distributions, confidence
@@ -21,7 +22,7 @@ class AnalyticsDashboard:
     ----------
     predictor : object
         FlashDet predictor returning Nx6 detections.
-    tracker : ByteTracker | None
+    tracker : FlashTracker | None
         Optional tracker — when provided, track-based statistics
         (unique IDs, active tracks) are also collected.
     window_size : int
@@ -35,13 +36,12 @@ class AnalyticsDashboard:
     def __init__(
         self,
         predictor,
-        tracker: Optional[ByteTracker] = None,
+        tracker: Optional[FlashTracker] = None,
         window_size: int = 300,
         class_names: Optional[List[str]] = None,
         conf_bins: int = 20,
     ):
-        self.predictor = predictor
-        self.tracker = tracker
+        super().__init__(predictor, tracker)
         self.window_size = window_size
         self.class_names = class_names
         self.conf_bins = conf_bins
@@ -53,25 +53,11 @@ class AnalyticsDashboard:
         self._conf_values: deque = deque(maxlen=window_size * 50)
         self._unique_track_ids: set = set()
         self._active_track_ids: deque = deque(maxlen=window_size)
-
         self._total_detections: int = 0
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Process one frame and accumulate statistics.
-
-        Returns
-        -------
-        annotated : np.ndarray
-            Frame with a statistics overlay panel in the top-left corner.
-        results : dict
-            Current analytics snapshot (same as :meth:`get_results`).
-        """
         self._frame_idx += 1
-        detections = self._run_detector(frame)
+        detections = self._detect(frame)
 
         frame_class_counts: Dict[int, int] = defaultdict(int)
         for det in detections:
@@ -100,23 +86,6 @@ class AnalyticsDashboard:
         return annotated, self.get_results()
 
     def get_results(self) -> Dict[str, Any]:
-        """Return a comprehensive analytics snapshot.
-
-        Keys
-        ----
-        frame_idx : int
-        total_detections : int
-        detections_per_frame : dict
-            ``avg``, ``min``, ``max`` over the recent window.
-        class_distribution : dict[str, int]
-            Cumulative counts keyed by class name or ID.
-        confidence_histogram : dict
-            ``{"bins": […], "counts": […]}``
-        unique_tracks : int
-            Total unique track IDs seen (only when tracker is used).
-        window_class_distribution : dict
-            Per-class counts aggregated over the recent window.
-        """
         counts_arr = np.array(self._det_counts) if self._det_counts else np.zeros(1)
         dpf = {
             "avg": round(float(counts_arr.mean()), 2),
@@ -124,13 +93,10 @@ class AnalyticsDashboard:
             "max": int(counts_arr.max()),
         }
 
-        # Class distribution with names
         class_dist: Dict[str, int] = {}
         for cls, cnt in sorted(self._class_counts.items()):
-            name = self._cls_name(cls)
-            class_dist[name] = cnt
+            class_dist[self._cls_name(cls)] = cnt
 
-        # Confidence histogram
         conf_arr = np.array(list(self._conf_values)) if self._conf_values else np.zeros(1)
         hist_counts, bin_edges = np.histogram(
             conf_arr, bins=self.conf_bins, range=(0.0, 1.0)
@@ -140,7 +106,6 @@ class AnalyticsDashboard:
             "counts": [int(c) for c in hist_counts],
         }
 
-        # Windowed class distribution
         win_class: Dict[str, int] = defaultdict(int)
         for frame_counts in self._window_class_counts:
             for cls, cnt in frame_counts.items():
@@ -184,7 +149,7 @@ class AnalyticsDashboard:
         return "\n".join(lines)
 
     def reset(self):
-        """Clear all accumulated statistics."""
+        super().reset()
         self._frame_idx = 0
         self._det_counts.clear()
         self._class_counts.clear()
@@ -193,15 +158,8 @@ class AnalyticsDashboard:
         self._unique_track_ids.clear()
         self._active_track_ids.clear()
         self._total_detections = 0
-        if self.tracker is not None:
-            self.tracker.reset()
-
-    # ------------------------------------------------------------------
-    # Drawing
-    # ------------------------------------------------------------------
 
     def _draw_overlay(self, img: np.ndarray):
-        """Render a translucent statistics panel on the image."""
         counts_arr = np.array(self._det_counts) if self._det_counts else np.zeros(1)
         avg_det = counts_arr.mean()
         cur_det = int(counts_arr[-1]) if len(counts_arr) > 0 else 0
@@ -224,7 +182,6 @@ class AnalyticsDashboard:
         cv2.putText(img, f"Total: {self._total_detections}", (10, y0),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
 
-        # Mini bar chart of top classes (last window)
         win_class: Dict[int, int] = defaultdict(int)
         for fc in self._window_class_counts:
             for cls, cnt in fc.items():
@@ -244,19 +201,7 @@ class AnalyticsDashboard:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
                 y0 += 14
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _cls_name(self, cls: int) -> str:
         if self.class_names and cls < len(self.class_names):
             return self.class_names[cls]
         return str(cls)
-
-    def _run_detector(self, frame: np.ndarray) -> np.ndarray:
-        result = self.predictor(frame)
-        if isinstance(result, np.ndarray):
-            return result
-        if hasattr(result, "detections"):
-            return np.asarray(result.detections, dtype=np.float64)
-        return np.empty((0, 6), dtype=np.float64)

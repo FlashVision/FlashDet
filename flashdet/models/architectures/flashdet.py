@@ -1,10 +1,10 @@
 """
-FlashDet — YOLO26-Based NMS-Free Object Detector.
+FlashDet — NMS-Free Object Detector.
 
-Architecture built on YOLO26 principles:
-  - YOLO11 Backbone (C3k2 + SPPF + C2PSA)
-  - YOLO11 PAN-FPN Neck
-  - DFL-free Dual Detection Head (One-to-One + One-to-Many)
+Architecture (unified RepNeXt-based design across all sizes):
+  - Backbone: PicoBlock + StrideDown (reparameterizable multi-scale DW)
+  - PicoNeck PAN-FPN (LiteModule-based, depthwise)
+  - DFL-free Depthwise Dual Detection Head (One-to-One + One-to-Many)
   - STAL (Small-Target-Aware Label Assignment)
   - ProgLoss (Progressive Loss shifting from o2m → o2o)
   - MuSGD optimizer (Muon + SGD hybrid)
@@ -15,14 +15,13 @@ NMS-Free Inference:
     the o2o head runs, producing at most one prediction per object.
     No NMS is needed — just score threshold + top-k.
 
-Model Sizes:
-    - FlashDet-P  (ShuffleNetV2-0.5x + GhostPAN):  ~298K inf params
-    - FlashDet-N  (width=0.25, depth=0.33): ~1.06M inf params
-    - FlashDet-S  (width=0.50, depth=0.33): ~4.2M inf params
-    - FlashDet-M  (width=1.00, depth=0.67): ~18M inf params
-
-Reference:
-    Ultralytics YOLO26 (2026).
+Model Sizes (RepNeXt backbone, strides 8/16/32):
+    - FlashDet-P  (PicoBackbone stem=24 + PicoNeck): ~298K inf params
+    - FlashDet-N  (FlashBackbone stem=32 + PicoNeck):  ~790K inf params
+    - FlashDet-S  (FlashBackbone stem=48 + PicoNeck):  ~1.8M inf params
+    - FlashDet-M  (FlashBackbone stem=64 + PicoNeck):  ~3.6M inf params
+    - FlashDet-L  (FlashBackbone stem=80 + PicoNeck):  ~5.8M inf params
+    - FlashDet-X  (FlashBackbone stem=96 + PicoNeck):  ~9.0M inf params
 """
 
 import logging
@@ -30,192 +29,50 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from flashdet.registry import DETECTORS
-from flashdet.models.backbone.yolov11_backbone import YOLOv11Backbone
-from flashdet.models.neck.yolov11_neck import YOLOv11Neck
-from flashdet.models.head.e2e_head import E2EDualHead
-from flashdet.losses.e2e_loss import E2EDetectionLoss, _make_anchor_grid, _decode_ltrb
+from flashdet.models.backbone.flash_backbone import FlashBackbone
+from flashdet.models.neck.pico_neck import PicoNeck
+from flashdet.models.head.e2e_head import E2EDetHead, E2EDualHead
+from flashdet.losses.e2e_loss import E2EDetectionLoss
+from flashdet.utils.bbox import make_anchor_grid, decode_ltrb, decode_batch_nms_free
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# NMS-Free decode utilities (shared by FlashDet and FlashDetPico)
+# Per-size architecture configs
 # ---------------------------------------------------------------------------
-
-def _decode_batch_nms_free(
-    cls_logits: torch.Tensor,
-    reg_preds: torch.Tensor,
-    anchor_centers: torch.Tensor,
-    anchor_strides: torch.Tensor,
-    img_hw: Tuple[int, int],
-    score_thr: float = 0.25,
-    max_det: int = 300,
-) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-    """Pure NMS-free batch decode — score threshold + top-k only.
-
-    The o2o head produces one prediction per anchor with 1:1 assignment,
-    so duplicates do not exist. This is the YOLO26 inference paradigm.
-
-    Args:
-        cls_logits: [B, N, num_classes] raw logits from o2o head.
-        reg_preds:  [B, N, 4] raw LTRB regression from o2o head.
-        anchor_centers: [N, 2] precomputed anchor grid centers.
-        anchor_strides: [N, 1] stride per anchor.
-        img_hw: (H, W) of the input image tensor.
-        score_thr: Minimum confidence to keep.
-        max_det: Maximum detections per image.
-
-    Returns:
-        List of (det_bboxes [M, 5], det_labels [M]) per image.
-    """
-    H, W = img_hw
-    B = cls_logits.shape[0]
-    device = cls_logits.device
-    results: List[Tuple[torch.Tensor, torch.Tensor]] = []
-
-    for b in range(B):
-        scores = cls_logits[b].sigmoid()                   # [N, C]
-        max_scores, labels = scores.max(dim=1)             # [N], [N]
-
-        keep = max_scores > score_thr
-        if keep.sum() == 0:
-            results.append((
-                torch.zeros((0, 5), device=device),
-                torch.zeros((0,), dtype=torch.long, device=device),
-            ))
-            continue
-
-        scores_k = max_scores[keep]
-        labels_k = labels[keep]
-        reg_k = reg_preds[b][keep]
-        centers_k = anchor_centers[keep]
-        strides_k = anchor_strides[keep]
-
-        boxes_k = _decode_ltrb(centers_k, strides_k, reg_k)
-        boxes_k[:, 0].clamp_(min=0, max=W)
-        boxes_k[:, 1].clamp_(min=0, max=H)
-        boxes_k[:, 2].clamp_(min=0, max=W)
-        boxes_k[:, 3].clamp_(min=0, max=H)
-
-        # Top-k by score (no NMS — o2o head is already duplicate-free)
-        if scores_k.shape[0] > max_det:
-            topk_idx = scores_k.topk(max_det).indices
-            scores_k = scores_k[topk_idx]
-            boxes_k = boxes_k[topk_idx]
-            labels_k = labels_k[topk_idx]
-
-        det_bboxes = torch.cat([boxes_k, scores_k[:, None]], dim=1)
-        results.append((det_bboxes, labels_k))
-
-    return results
 
 SIZE_CONFIGS = {
     "p": {"type": "pico"},
-    "n": {"width_mult": 0.25, "depth_mult": 0.33, "use_c2psa": True},
-    "s": {"width_mult": 0.50, "depth_mult": 0.33, "use_c2psa": True},
-    "m": {"width_mult": 1.00, "depth_mult": 0.67, "use_c2psa": True},
-    "l": {"width_mult": 1.25, "depth_mult": 1.00, "use_c2psa": True},
-    "x": {"width_mult": 1.50, "depth_mult": 1.00, "use_c2psa": True},
+    "n": {"stem": 32,  "depths": (2, 4, 2),   "neck_ch": 96,  "neck_blocks": 1},
+    "s": {"stem": 48,  "depths": (3, 6, 3),   "neck_ch": 128, "neck_blocks": 1},
+    "m": {"stem": 64,  "depths": (4, 8, 4),   "neck_ch": 192, "neck_blocks": 2},
+    "l": {"stem": 80,  "depths": (4, 12, 4),  "neck_ch": 256, "neck_blocks": 2},
+    "x": {"stem": 96,  "depths": (4, 16, 4),  "neck_ch": 320, "neck_blocks": 2},
 }
 
 
-class _PicoDetHead(nn.Module):
-    """Ultra-lightweight depthwise-separable detection head for Pico.
-
-    Uses depthwise separable convolutions instead of full convolutions
-    to minimize parameters while maintaining receptive field.
-    """
-
-    def __init__(self, num_classes: int, in_channels: int):
-        super().__init__()
-        self.num_classes = num_classes
-
-        self.cls_convs = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, 3, 1, 1, groups=in_channels, bias=False),
-            nn.BatchNorm2d(in_channels),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(in_channels, in_channels, 1, bias=False),
-            nn.BatchNorm2d(in_channels),
-            nn.SiLU(inplace=True),
-        )
-        self.reg_convs = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, 3, 1, 1, groups=in_channels, bias=False),
-            nn.BatchNorm2d(in_channels),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(in_channels, in_channels, 1, bias=False),
-            nn.BatchNorm2d(in_channels),
-            nn.SiLU(inplace=True),
-        )
-        self.cls_pred = nn.Conv2d(in_channels, num_classes, 1)
-        self.reg_pred = nn.Conv2d(in_channels, 4, 1)
-        # Learnable gates start at 0 so residual is off initially,
-        # preserving the focal-loss bias prior (-4.595). Gates learn
-        # to open during training, gradually adding the skip path.
-        self.cls_gate = nn.Parameter(torch.zeros(1))
-        self.reg_gate = nn.Parameter(torch.zeros(1))
-
-    def forward(self, x):
-        cls_feat = self.cls_convs(x) + self.cls_gate * x
-        reg_feat = self.reg_convs(x) + self.reg_gate * x
-        return self.cls_pred(cls_feat), self.reg_pred(reg_feat)
-
-
-class _PicoDualHead(nn.Module):
-    """Pico dual detection head with shared depthwise stems."""
-
-    def __init__(self, num_classes: int, in_channels: int, num_levels: int = 3):
-        super().__init__()
-        self.o2o_heads = nn.ModuleList([
-            _PicoDetHead(num_classes, in_channels) for _ in range(num_levels)
-        ])
-        self.o2m_heads = nn.ModuleList([
-            _PicoDetHead(num_classes, in_channels) for _ in range(num_levels)
-        ])
-
-    def forward(self, features, training=True):
-        o2o_cls_list, o2o_reg_list, feat_sizes = [], [], []
-        for head, feat in zip(self.o2o_heads, features):
-            cls, reg = head(feat)
-            B, _, H, W = cls.shape
-            feat_sizes.append((H, W))
-            o2o_cls_list.append(cls.permute(0, 2, 3, 1).reshape(B, H * W, -1))
-            o2o_reg_list.append(reg.permute(0, 2, 3, 1).reshape(B, H * W, 4))
-
-        result = {
-            "o2o_cls": torch.cat(o2o_cls_list, dim=1),
-            "o2o_reg": torch.cat(o2o_reg_list, dim=1),
-            "feat_sizes": feat_sizes,
-        }
-        if training:
-            o2m_cls_list, o2m_reg_list = [], []
-            for head, feat in zip(self.o2m_heads, features):
-                cls, reg = head(feat)
-                B, _, H, W = cls.shape
-                o2m_cls_list.append(cls.permute(0, 2, 3, 1).reshape(B, H * W, -1))
-                o2m_reg_list.append(reg.permute(0, 2, 3, 1).reshape(B, H * W, 4))
-            result["o2m_cls"] = torch.cat(o2m_cls_list, dim=1)
-            result["o2m_reg"] = torch.cat(o2m_reg_list, dim=1)
-        return result
-
+# ---------------------------------------------------------------------------
+# FlashDet-Pico  (sub-1MB detector)
+# ---------------------------------------------------------------------------
 
 @DETECTORS.register("FlashDetPico")
 class FlashDetPico(nn.Module):
     """FlashDet-Pico — Sub-1MB object detector.
 
     Architecture optimized for extreme efficiency:
-      - ShuffleNetV2-0.5x backbone (channel shuffle + depthwise, ImageNet pretrained)
-      - GhostPAN neck with 64-ch output (Ghost modules for cheap features)
+      - LiteBackbone-0.5x (channel mixing + depthwise, ImageNet pretrained)
+      - PicoNeck with 64-ch output (lightweight modules for cheap features)
       - Depthwise-separable E2E dual head
       - STAL + ProgLoss (same training recipe as larger FlashDet)
 
     Target: < 500K inference params = < 1MB FP16 weight file.
 
     Model Stats:
-      - Inference params: ~397K  (~0.76 MB FP16)
-      - Training params:  ~479K  (incl. o2m head)
+      - Inference params: ~297K  (~0.57 MB FP16)
+      - Training params:  ~344K  (incl. o2m head)
     """
 
     def __init__(
@@ -225,13 +82,12 @@ class FlashDetPico(nn.Module):
         total_epochs: int = 100,
         neck_channels: int = 64,
         pretrained_backbone: bool = True,
-        backbone_type: str = "shufflenet",
+        backbone_type: str = "lite",
         **kwargs,
     ):
         super().__init__()
-        from flashdet.models.backbone.shufflenet import ShuffleNetV2
-        from flashdet.models.backbone.repnext_pico import RepNeXtPico
-        from flashdet.models.neck.ghost_pan import GhostPAN
+        from flashdet.models.backbone.lite_backbone import LiteBackbone
+        from flashdet.models.backbone.pico_backbone import PicoBackbone
 
         self.num_classes = num_classes
         self.size = "p"
@@ -239,8 +95,8 @@ class FlashDetPico(nn.Module):
         self.total_epochs = total_epochs
         self.backbone_type = backbone_type
 
-        if backbone_type == "repnext":
-            self.backbone = RepNeXtPico(
+        if backbone_type in ("pico_v2", "repnext"):
+            self.backbone = PicoBackbone(
                 stem_channels=24,
                 stage_channels=(48, 96, 192),
                 stage_depths=(2, 3, 1),
@@ -248,14 +104,14 @@ class FlashDetPico(nn.Module):
                 activation="LeakyReLU",
             )
         else:
-            self.backbone = ShuffleNetV2(
+            self.backbone = LiteBackbone(
                 model_size="0.5x",
                 out_stages=(2, 3, 4),
                 pretrained=pretrained_backbone,
                 activation="LeakyReLU",
             )
 
-        self.neck = GhostPAN(
+        self.neck = PicoNeck(
             in_channels=self.backbone.out_channels,
             out_channels=neck_channels,
             kernel_size=5,
@@ -264,7 +120,7 @@ class FlashDetPico(nn.Module):
             activation="LeakyReLU",
         )
 
-        self.head = _PicoDualHead(num_classes, neck_channels, num_levels=3)
+        self.head = E2EDualHead(num_classes, neck_channels, num_levels=3)
 
         self.loss_fn = E2EDetectionLoss(
             num_classes=num_classes,
@@ -281,11 +137,11 @@ class FlashDetPico(nn.Module):
         self._init_weights()
 
         bb_loaded = getattr(self.backbone, "pretrained_loaded", False)
-        if backbone_type == "repnext":
-            logger.info("FlashDetPico backbone: RepNeXtPico (trained from scratch)")
+        if backbone_type in ("pico_v2", "repnext"):
+            logger.info("FlashDetPico backbone: PicoBackbone (trained from scratch)")
         else:
             logger.info(
-                "FlashDetPico backbone: ShuffleNetV2-0.5x %s",
+                "FlashDetPico backbone: LiteBackbone-0.5x %s",
                 "(ImageNet pretrained)" if bb_loaded else "(RANDOM init)",
             )
 
@@ -300,11 +156,9 @@ class FlashDetPico(nn.Module):
                 elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
                     nn.init.ones_(m.weight)
                     nn.init.zeros_(m.bias)
-        # Focal-loss prior bias for classification heads (prior=0.01)
         for heads in [self.head.o2o_heads, self.head.o2m_heads]:
             for h in heads:
                 nn.init.constant_(h.cls_pred.bias, -4.595)
-                # Regression head: small init for stable early predictions
                 nn.init.normal_(h.reg_pred.weight, std=0.001)
                 nn.init.zeros_(h.reg_pred.bias)
 
@@ -333,9 +187,7 @@ class FlashDetPico(nn.Module):
                 epoch=epoch, total_epochs=self.total_epochs,
             )
             result["loss"] = loss
-            # Store loss_states on the module so DataParallel doesn't
-            # try to gather non-tensor values (prog_alpha is a float,
-            # feat_sizes is a list of tuples).
+            result["loss_states"] = loss_states
             self._last_loss_states = loss_states
 
         if return_features or not self.training:
@@ -347,7 +199,6 @@ class FlashDetPico(nn.Module):
             result["preds"] = head_out["o2o_cls"]
         return result
 
-    # ------ Anchor grid cache (avoids recompute per call) ------
     _cached_anchors: Optional[Tuple[Tuple[int, ...], torch.Tensor, torch.Tensor]] = None
 
     def _get_anchors(self, feat_sizes, device):
@@ -356,7 +207,7 @@ class FlashDetPico(nn.Module):
             c, s = self._cached_anchors[1], self._cached_anchors[2]
             if c.device == device:
                 return c, s
-        centers, strides = _make_anchor_grid(feat_sizes, list(self.strides), device)
+        centers, strides = make_anchor_grid(feat_sizes, list(self.strides), device)
         self._cached_anchors = (key, centers, strides)
         return centers, strides
 
@@ -368,7 +219,7 @@ class FlashDetPico(nn.Module):
         anchor_centers, anchor_strides = self._get_anchors(
             out["feat_sizes"], x.device
         )
-        return _decode_batch_nms_free(
+        return decode_batch_nms_free(
             out["o2o_cls"], out["o2o_reg"],
             anchor_centers, anchor_strides,
             img_hw=(x.shape[2], x.shape[3]),
@@ -402,27 +253,31 @@ class FlashDetPico(nn.Module):
         }
 
 
+# ---------------------------------------------------------------------------
+# FlashDet N/S/M/L/X  (scaled RepNeXt architecture)
+# ---------------------------------------------------------------------------
+
 @DETECTORS.register("FlashDet")
 class FlashDet(nn.Module):
-    """FlashDet — YOLO26-based lightweight object detector.
+    """FlashDet — NMS-free object detector (RepNeXt-based).
+
+    Unified architecture family based on PicoBackbone's reparameterizable
+    multi-scale depthwise blocks, scaled via explicit channel/depth configs.
+
+    Components (consistent across all sizes):
+      - FlashBackbone: PicoBlock + StrideDown (RepNeXt reparameterization)
+      - PicoNeck: LiteModule-based PAN-FPN (depthwise separable)
+      - DW dual head: Depthwise-separable o2o + o2m detection heads
 
     Args:
         num_classes: Number of detection classes.
         size: Model size variant ("p", "n", "s", "m", "l", "x").
-            "p" (Pico) returns a :class:`FlashDetPico` — a sub-1MB model
-            using ShuffleNetV2 + GhostPAN + depthwise heads.
-        width_mult: Override width multiplier (ignored if size is set).
-        depth_mult: Override depth multiplier (ignored if size is set).
-        use_c2psa: Use C2PSA attention in backbone.
+            "p" (Pico) returns a :class:`FlashDetPico`.
+        stem_channels: Override backbone stem width.
+        stage_depths: Override backbone per-stage block counts.
+        neck_channels: Override PicoNeck output width.
         strides: Feature pyramid strides.
         total_epochs: Total training epochs (for ProgLoss scheduling).
-        prog_alpha_init: ProgLoss initial o2m weight.
-        prog_alpha_final: ProgLoss final o2m weight.
-        o2m_topk: One-to-many assigner top-k.
-        o2o_topk: One-to-one assigner top-k.
-        box_weight: CIoU loss weight.
-        cls_weight: Classification loss weight.
-        l1_weight: L1 distance loss weight.
     """
 
     def __new__(cls, num_classes=80, size="n", **kwargs):
@@ -434,9 +289,9 @@ class FlashDet(nn.Module):
         self,
         num_classes: int = 80,
         size: str = "n",
-        width_mult: Optional[float] = None,
-        depth_mult: Optional[float] = None,
-        use_c2psa: Optional[bool] = None,
+        stem_channels: Optional[int] = None,
+        stage_depths: Optional[Tuple[int, ...]] = None,
+        neck_channels: Optional[int] = None,
         strides: Tuple[int, ...] = (8, 16, 32),
         total_epochs: int = 100,
         prog_alpha_init: float = 1.0,
@@ -446,30 +301,42 @@ class FlashDet(nn.Module):
         box_weight: float = 7.5,
         cls_weight: float = 0.5,
         l1_weight: float = 1.5,
+        **kwargs,
     ):
         if size == "p":
             return
         super().__init__()
 
         cfg = SIZE_CONFIGS.get(size, SIZE_CONFIGS["n"])
-        wm = width_mult if width_mult is not None else cfg["width_mult"]
-        dm = depth_mult if depth_mult is not None else cfg["depth_mult"]
-        c2psa = use_c2psa if use_c2psa is not None else cfg["use_c2psa"]
+        _stem = stem_channels if stem_channels is not None else cfg["stem"]
+        _depths = stage_depths if stage_depths is not None else cfg["depths"]
+        _neck_ch = neck_channels if neck_channels is not None else cfg["neck_ch"]
+        _neck_blocks = cfg.get("neck_blocks", 1)
 
         self.num_classes = num_classes
         self.size = size
         self.strides = strides
         self.total_epochs = total_epochs
 
-        # Backbone: YOLO11 C3k2 + SPPF + C2PSA
-        self.backbone = YOLOv11Backbone(wm, dm, c2psa)
+        # Backbone: RepNeXt-style (PicoBlock + StrideDown + SpatialPool)
+        self.backbone = FlashBackbone(
+            stem_channels=_stem,
+            stage_depths=_depths,
+            use_sppf=True,
+        )
 
-        # Neck: YOLO11 PAN-FPN
-        neck_out = self.backbone.out_channels[1]
-        self.neck = YOLOv11Neck(self.backbone.out_channels, neck_out)
+        # Neck: PicoNeck PAN-FPN (LiteModule-based, depthwise)
+        self.neck = PicoNeck(
+            in_channels=self.backbone.out_channels,
+            out_channels=_neck_ch,
+            kernel_size=5,
+            num_blocks=_neck_blocks,
+            use_depthwise=True,
+            activation="LeakyReLU",
+        )
 
-        # Head: DFL-free dual detection head (o2o + o2m)
-        self.head = E2EDualHead(num_classes, neck_out, num_levels=3)
+        # Head: Depthwise-separable dual detection head (o2o + o2m)
+        self.head = E2EDualHead(num_classes, _neck_ch, num_levels=3)
 
         # Loss: E2E with ProgLoss + STAL
         self.loss_fn = E2EDetectionLoss(
@@ -487,16 +354,16 @@ class FlashDet(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        """Kaiming-normal init for all conv layers + proper BN/bias priors."""
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-                if m.bias is not None:
+        """Init neck + head only; backbone handles its own init."""
+        for module in (self.neck, self.head):
+            for m in module.modules():
+                if isinstance(m, nn.Conv2d):
+                    nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="leaky_relu")
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                    nn.init.ones_(m.weight)
                     nn.init.zeros_(m.bias)
-            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
-        # Focal-loss prior bias for classification heads (prior=0.01)
         for heads in [self.head.o2o_heads, self.head.o2m_heads]:
             for h in heads:
                 nn.init.constant_(h.cls_pred.bias, -4.595)
@@ -512,19 +379,6 @@ class FlashDet(nn.Module):
         return_features: bool = False,
         **kwargs,
     ) -> Dict:
-        """Forward pass.
-
-        Args:
-            x: [B, 3, H, W] input tensor.
-            gt_meta: Ground truth with "gt_bboxes" and "gt_labels".
-            epoch: Current training epoch (for ProgLoss schedule).
-            compute_loss: Force loss computation even in eval mode.
-            return_features: Include backbone/neck features in output.
-
-        Returns:
-            Training: {"loss", "loss_states"} and optionally features.
-            Inference: {"preds"} — o2o head outputs for NMS-free decode.
-        """
         features = self.backbone(x)
         neck_feats = self.neck(features)
         head_out = self.head(neck_feats, training=self.training or compute_loss)
@@ -556,9 +410,7 @@ class FlashDet(nn.Module):
             )
 
             result["loss"] = loss
-            # Store loss_states on the module so DataParallel doesn't
-            # try to gather non-tensor values (prog_alpha is a float,
-            # feat_sizes is a list of tuples).
+            result["loss_states"] = loss_states
             self._last_loss_states = loss_states
 
         if return_features or not self.training:
@@ -571,7 +423,6 @@ class FlashDet(nn.Module):
 
         return result
 
-    # ------ Anchor grid cache (avoids recompute per call) ------
     _cached_anchors: Optional[Tuple[Tuple[int, ...], torch.Tensor, torch.Tensor]] = None
 
     def _get_anchors(self, feat_sizes, device):
@@ -580,7 +431,7 @@ class FlashDet(nn.Module):
             c, s = self._cached_anchors[1], self._cached_anchors[2]
             if c.device == device:
                 return c, s
-        centers, strides = _make_anchor_grid(feat_sizes, list(self.strides), device)
+        centers, strides = make_anchor_grid(feat_sizes, list(self.strides), device)
         self._cached_anchors = (key, centers, strides)
         return centers, strides
 
@@ -593,21 +444,13 @@ class FlashDet(nn.Module):
         max_det: int = 300,
         **kwargs,
     ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-        """NMS-free inference — YOLO26 one-to-one head, no post-processing.
-
-        The o2o head is trained with 1:1 label assignment so each object
-        produces exactly one prediction. No NMS is needed — just score
-        threshold + top-k, making this extremely fast on CPU.
-
-        Returns:
-            List of (det_bboxes [N,5], det_labels [N]) per image.
-        """
+        """NMS-free inference — one-to-one head, no post-processing."""
         self.eval()
         out = self.forward(x)
         anchor_centers, anchor_strides = self._get_anchors(
             out["feat_sizes"], x.device
         )
-        return _decode_batch_nms_free(
+        return decode_batch_nms_free(
             out["o2o_cls"], out["o2o_reg"],
             anchor_centers, anchor_strides,
             img_hw=(x.shape[2], x.shape[3]),
@@ -615,11 +458,7 @@ class FlashDet(nn.Module):
         )
 
     def strip_o2m(self):
-        """Remove one-to-many heads and loss for lean CPU/edge deployment.
-
-        After calling this the model cannot be trained, but inference is
-        faster and the checkpoint is smaller.
-        """
+        """Remove one-to-many heads and loss for lean CPU/edge deployment."""
         del self.head.o2m_heads
         del self.loss_fn
         self.head.o2m_heads = None  # type: ignore[assignment]
@@ -631,8 +470,6 @@ class FlashDet(nn.Module):
         """Get model information."""
         total = sum(p.numel() for p in self.parameters())
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-
-        # Inference uses only o2o heads (o2m is training-only)
         o2m_params = sum(p.numel() for p in self.head.o2m_heads.parameters())
         inference_params = total - o2m_params
 

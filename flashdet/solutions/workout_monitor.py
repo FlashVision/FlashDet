@@ -8,40 +8,31 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from flashdet.trackers.byte_tracker import ByteTracker
+from flashdet.trackers import FlashTracker
+from flashdet.solutions._base import BaseSolution
 
 
-class WorkoutMonitor:
+class WorkoutMonitor(BaseSolution):
     """Count exercise repetitions by analysing vertical bounding-box movement.
 
     For exercises like squats, push-ups, or jumping jacks the bounding box
     height or vertical centre oscillates periodically.  The monitor detects
     these oscillations and counts full up-down cycles as repetitions.
 
-    The state machine:
-
-    *  ``up``   → the person's bbox centre is above the midpoint threshold.
-    *  ``down`` → the person's bbox centre is below the midpoint threshold.
-
-    A rep is counted on each ``down → up`` transition (configurable).
-
     Parameters
     ----------
     predictor : object
         FlashDet predictor returning Nx6 detections.
-    tracker : ByteTracker | None
+    tracker : FlashTracker | None
         Multi-object tracker.
     exercise_type : str
         Hint label such as ``"squats"``, ``"pushups"``, ``"jumping_jacks"``.
     up_threshold : float
         Fractional bbox-height position that counts as "up" (0 = top).
-        Default 0.4 — the centre is in the upper 40 % of the bbox's
-        recent range.
     down_threshold : float
-        Fractional position that counts as "down".  Default 0.6.
+        Fractional position that counts as "down".
     window : int
-        Number of frames over which to compute the y-range for
-        normalisation.
+        Number of frames over which to compute the y-range.
     classes : list[int] | None
         Only monitor these class IDs (typically ``[0]`` for *person*).
     """
@@ -53,20 +44,19 @@ class WorkoutMonitor:
     def __init__(
         self,
         predictor,
-        tracker: Optional[ByteTracker] = None,
+        tracker: Optional[FlashTracker] = None,
         exercise_type: str = "squats",
         up_threshold: float = 0.4,
         down_threshold: float = 0.6,
         window: int = 60,
         classes: Optional[List[int]] = None,
     ):
-        self.predictor = predictor
-        self.tracker = tracker or ByteTracker()
+        super().__init__(predictor, tracker, classes)
+        self._ensure_tracker()
         self.exercise_type = exercise_type
         self.up_threshold = up_threshold
         self.down_threshold = down_threshold
         self.window = window
-        self.classes = classes
 
         self._cy_history: Dict[int, deque] = defaultdict(
             lambda: deque(maxlen=window)
@@ -77,21 +67,8 @@ class WorkoutMonitor:
         self._states: Dict[int, str] = defaultdict(lambda: self._STATE_INIT)
         self._rep_counts: Dict[int, int] = defaultdict(int)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Process one frame and update rep counts.
-
-        Returns
-        -------
-        annotated : np.ndarray
-            Frame with bounding boxes, states and rep counts.
-        results : dict
-            ``{"tracks": {id: {"rep_count": …, "state": …, "exercise": …}}}``
-        """
-        detections = self._run_detector(frame)
+        detections = self._detect(frame)
         tracks = self.tracker.update(detections)
 
         annotated = frame.copy()
@@ -99,7 +76,7 @@ class WorkoutMonitor:
         for trk in tracks:
             x1, y1, x2, y2, tid, score, cls = trk
             tid, cls = int(tid), int(cls)
-            if self.classes is not None and cls not in self.classes:
+            if not self._filter_class(cls):
                 continue
 
             cy = (y1 + y2) / 2.0
@@ -120,13 +97,11 @@ class WorkoutMonitor:
                 if prev_state == self._STATE_DOWN and self._states[tid] == self._STATE_UP:
                     self._rep_counts[tid] += 1
 
-            # Draw
             color = self._state_color(self._states[tid])
             cv2.rectangle(annotated, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
 
-            state_label = self._states[tid]
             reps = self._rep_counts[tid]
-            label = f"ID:{tid} {self.exercise_type} R:{reps} [{state_label}]"
+            label = f"ID:{tid} {self.exercise_type} R:{reps} [{self._states[tid]}]"
             cv2.putText(
                 annotated, label,
                 (int(x1), int(y1) - 8),
@@ -152,7 +127,6 @@ class WorkoutMonitor:
         return annotated, self.get_results()
 
     def get_results(self) -> Dict[str, Any]:
-        """Return per-track rep counts and states."""
         tracks: Dict[int, Dict[str, Any]] = {}
         for tid in self._rep_counts:
             tracks[tid] = {
@@ -163,19 +137,13 @@ class WorkoutMonitor:
         return {"tracks": tracks, "total_reps": sum(self._rep_counts.values())}
 
     def reset(self):
-        """Clear all rep counts and history."""
+        super().reset()
         self._cy_history.clear()
         self._bh_history.clear()
         self._states.clear()
         self._rep_counts.clear()
-        self.tracker.reset()
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _normalised_position(self, tid: int, cy: float) -> Optional[float]:
-        """Map *cy* to [0, 1] using the observed min/max range for *tid*."""
         history = self._cy_history[tid]
         if len(history) < 10:
             return None
@@ -193,11 +161,3 @@ class WorkoutMonitor:
         if state == WorkoutMonitor._STATE_DOWN:
             return (0, 0, 255)
         return (200, 200, 200)
-
-    def _run_detector(self, frame: np.ndarray) -> np.ndarray:
-        result = self.predictor(frame)
-        if isinstance(result, np.ndarray):
-            return result
-        if hasattr(result, "detections"):
-            return np.asarray(result.detections, dtype=np.float64)
-        return np.empty((0, 6), dtype=np.float64)

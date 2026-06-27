@@ -12,7 +12,7 @@ license = {text = "MIT"}
 authors = [
     {name = "FlashVision"},
 ]
-keywords = ["object-detection", "computer-vision", "deep-learning", "pytorch", "lora", "knowledge-distillation", "nanodet", "edge-ai", "onnx", "quantization"]
+keywords = ["object-detection", "computer-vision", "deep-learning", "pytorch", "lora", "knowledge-distillation", "edge-ai", "onnx", "quantization"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -44,7 +44,7 @@ tracker = ["scipy>=1.10.0", "lap>=0.4.0"]
 solutions = ["scipy>=1.10.0"]
 analytics = ["matplotlib>=3.7.0", "pandas>=2.0.0"]
 all = ["onnx>=1.14.0", "onnxruntime>=1.15.0", "onnxsim>=0.4.0", "scipy>=1.10.0", "lap>=0.4.0", "matplotlib>=3.7.0", "pandas>=2.0.0"]
-dev = ["pytest", "ruff", "pre-commit"]
+dev = ["pytest>=7.0", "pytest-timeout>=2.1", "pytest-cov>=4.0", "ruff", "pre-commit"]
 
 [project.urls]
 Homepage = "https://github.com/FlashVision/FlashDet"
@@ -56,6 +56,20 @@ flashdet = "flashdet.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["flashdet*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests as requiring CUDA GPU",
+    "integration: end-to-end pipeline tests",
+    "smoke: fast sanity checks",
+]
+addopts = "-v --tb=short --strict-markers"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
 
 [tool.ruff]
 line-length = 120

@@ -1,29 +1,28 @@
 """
-DFL-Free End-to-End Dual Detection Head for YOLO26-based FlashDet.
+DFL-Free End-to-End Dual Detection Head for FlashDet.
 
-Key differences from standard YOLO heads:
+Key design choices:
   - No Distribution Focal Loss (DFL): regression outputs 4 values
     (LTRB) directly instead of 4*(reg_max+1) distribution logits.
   - Dual-head: One-to-One (NMS-free inference) + One-to-Many (dense training).
+  - Depthwise-separable convolutions with gated residual for efficiency.
   - Both heads share the same architecture but are independent modules.
-
-Reference:
-    Ultralytics YOLO26 (2026), Section 3.2.
 """
 
 import torch
 import torch.nn as nn
 from typing import List, Tuple
 
-from flashdet.models.layers import ConvBNSiLU
-
 
 class E2EDetHead(nn.Module):
-    """DFL-free decoupled detection head (single branch).
+    """Depthwise-separable detection head with gated residual.
+
+    Uses DW 3x3 -> PW 1x1 instead of full 3x3 convolutions,
+    with learnable gated residual connections for stable training.
 
     Outputs:
         cls: [B, num_classes, H, W]
-        reg: [B, 4, H, W]  — raw LTRB logits (decode with exp * stride)
+        reg: [B, 4, H, W] — raw LTRB logits (decode with softplus * stride)
     """
 
     def __init__(self, num_classes: int, in_channels: int):
@@ -31,23 +30,35 @@ class E2EDetHead(nn.Module):
         self.num_classes = num_classes
 
         self.cls_convs = nn.Sequential(
-            ConvBNSiLU(in_channels, in_channels, 3),
-            ConvBNSiLU(in_channels, in_channels, 3),
+            nn.Conv2d(in_channels, in_channels, 3, 1, 1, groups=in_channels, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(in_channels, in_channels, 1, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.SiLU(inplace=True),
         )
         self.reg_convs = nn.Sequential(
-            ConvBNSiLU(in_channels, in_channels, 3),
-            ConvBNSiLU(in_channels, in_channels, 3),
+            nn.Conv2d(in_channels, in_channels, 3, 1, 1, groups=in_channels, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(in_channels, in_channels, 1, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.SiLU(inplace=True),
         )
         self.cls_pred = nn.Conv2d(in_channels, num_classes, 1)
         self.reg_pred = nn.Conv2d(in_channels, 4, 1)
+        self.cls_gate = nn.Parameter(torch.zeros(1))
+        self.reg_gate = nn.Parameter(torch.zeros(1))
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Returns (cls_logits, reg_preds) each [B, C, H, W]."""
-        return self.cls_pred(self.cls_convs(x)), self.reg_pred(self.reg_convs(x))
+        cls_feat = self.cls_convs(x) + self.cls_gate * x
+        reg_feat = self.reg_convs(x) + self.reg_gate * x
+        return self.cls_pred(cls_feat), self.reg_pred(reg_feat)
 
 
 class E2EDualHead(nn.Module):
-    """YOLO26-style dual detection head: One-to-One + One-to-Many.
+    """Dual detection head: One-to-One + One-to-Many.
 
     During training, both heads produce predictions. At inference,
     only the one-to-one head is used (NMS-free).
@@ -100,12 +111,9 @@ class E2EDualHead(nn.Module):
             o2o_cls_list.append(cls.permute(0, 2, 3, 1).reshape(B, H * W, -1))
             o2o_reg_list.append(reg.permute(0, 2, 3, 1).reshape(B, H * W, 4))
 
-        o2o_cls = torch.cat(o2o_cls_list, dim=1)  # [B, N, num_classes]
-        o2o_reg = torch.cat(o2o_reg_list, dim=1)   # [B, N, 4]
-
         result = {
-            "o2o_cls": o2o_cls,
-            "o2o_reg": o2o_reg,
+            "o2o_cls": torch.cat(o2o_cls_list, dim=1),
+            "o2o_reg": torch.cat(o2o_reg_list, dim=1),
             "feat_sizes": feat_sizes,
         }
 
@@ -117,7 +125,6 @@ class E2EDualHead(nn.Module):
                 B, _, H, W = cls.shape
                 o2m_cls_list.append(cls.permute(0, 2, 3, 1).reshape(B, H * W, -1))
                 o2m_reg_list.append(reg.permute(0, 2, 3, 1).reshape(B, H * W, 4))
-
             result["o2m_cls"] = torch.cat(o2m_cls_list, dim=1)
             result["o2m_reg"] = torch.cat(o2m_reg_list, dim=1)
 

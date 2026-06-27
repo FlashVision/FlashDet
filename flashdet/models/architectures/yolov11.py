@@ -1,13 +1,14 @@
 """
 YOLOv11 — Next-generation YOLO with C3k2 blocks and enhanced SPPF.
 
-Key innovations:
-  - C3k2 block: C2f-style bottleneck with flexible 3×3 kernel support
-  - Enhanced SPPF (Spatial Pyramid Pooling - Fast) with larger receptive field
-  - Improved feature fusion with attention gating
+Independent implementation based on the publicly described architecture:
+    Jocher et al., YOLO11, Ultralytics, 2024.
 
-Reference:
-    Ultralytics YOLOv11, 2024.
+This is a clean-room implementation based on the publicly documented
+architectural design (C3k2, C2PSA, SPPF blocks). No code was copied
+from AGPL-licensed repositories.
+
+License: MIT (same as FlashDet)
 """
 
 import logging

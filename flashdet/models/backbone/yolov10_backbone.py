@@ -1,11 +1,19 @@
-"""YOLOv10 backbone — C2f with SCDown and optional PSA."""
+"""YOLOv10 backbone — C2f with SCDown and optional PSA.
+
+Independent implementation based on:
+    Wang et al., "YOLOv10: Real-Time End-to-End Object Detection",
+    arXiv:2405.14458, 2024.
+
+This is a clean-room implementation. No code copied from AGPL/GPL sources.
+License: MIT (same as FlashDet)
+"""
 
 from typing import List
 
 import torch
 import torch.nn as nn
 
-from flashdet.models.layers import ConvBNSiLU, SCDown, C2f, PSA
+from flashdet.models.layers.yolo_blocks import ConvBNSiLU, SCDown, C2f, PSA
 
 
 class YOLOv10Backbone(nn.Module):

@@ -6,7 +6,7 @@ Usage:
     python train.py
     python train.py --epochs 200 --batch-size 32
     python train.py --resume workspace/flashdet_output/checkpoint_last.pth
-    python train.py --pretrained-coco --mosaic --mixup
+    python train.py --finetune checkpoint.pth --mosaic --mixup
 """
 
 import os
@@ -25,7 +25,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from flashdet.cfg import get_config
-from flashdet.models import FlashDet, load_coco_pretrained
+from flashdet.models import FlashDet
 from flashdet.models.lora import apply_lora, apply_qlora, merge_lora_weights, get_lora_state_dict
 from flashdet.data import create_dataloader, verify_dataset
 from flashdet.utils import save_checkpoint, load_checkpoint, save_weights_only, save_inference_weights, setup_logger, AverageMeter
@@ -274,7 +274,7 @@ def _save_training_csv(history, csv_path):
 def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_dir=None, config=None, ema=None,
                     class_names=None, colors=None, scaler=None, grad_accum=1,
                     nb=None, nw=-1, warmup_momentum=0.8, base_momentum=0.937, lf=None, base_lr=0.001):
-    """Train for one epoch with iteration-based warmup (Ultralytics style)."""
+    """Train for one epoch with iteration-based warmup."""
     model.train()
     use_amp = scaler is not None
 
@@ -305,7 +305,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
     current_ms_size = None
 
     for batch_idx, (images, gt_meta) in enumerate(dataloader):
-        # Iteration-based warmup (Ultralytics style)
+        # Iteration-based warmup
         ni = batch_idx + nb * (epoch - 1)
         if ni <= nw:
             xi = [0, nw]
@@ -415,7 +415,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
         logger.warning(
             f"DIAGNOSTIC: {zero_pos_batches}/{total_batches} batches had ZERO positive "
             f"assignments. If this is > 50%, the assigner cannot match predictions to GT "
-            f"— loss WILL NOT decrease. Use --pretrained-coco or train without --lora."
+            f"— loss WILL NOT decrease. Use --finetune or train without --lora."
         )
 
     result = {"loss": loss_meter.avg}
@@ -509,6 +509,8 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Train FlashDet")
+    parser.add_argument("--config", default=None,
+                        help="Path to YAML config file")
     parser.add_argument("--epochs", type=int, default=100, help="Training epochs")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
@@ -525,24 +527,21 @@ def main():
                         help="Run validation/mAP every N epochs (default: config value, usually 5). Set to 1 for every epoch.")
     parser.add_argument("--model-size", default="n", choices=["p", "n", "s", "m", "l", "x"],
                         help="Model size: p (~298K pico), n (~1.5M), s (~5.4M), m (~18M), l, x")
-    parser.add_argument("--backbone", default="shufflenet",
-                        choices=["shufflenet", "repnext"],
-                        help="Pico backbone: shufflenet (ShuffleNetV2-0.5x), repnext (RepNeXt-Pico)")
+    parser.add_argument("--backbone", default="lite",
+                        choices=["lite", "pico_v2"],
+                        help="Pico backbone: lite (LiteBackbone), pico_v2 (PicoBackbone)")
     parser.add_argument("--architecture", default="flashdet",
-                        choices=["flashdet", "detr", "rt-detr", "yolov9", "yolov10", "yolov11", "grounding-dino"],
+                        choices=["flashdet", "yolov8", "yolov9", "yolov10", "yolov11", "yolox"],
                         help="Detection architecture (default: flashdet)")
     parser.add_argument("--input-size", type=int, default=320, help="Input image size (320 or 416)")
     parser.add_argument("--optimizer", default="musgd", choices=["musgd", "adamw", "sgd"],
-                        help="Optimizer: musgd (YOLO26 default), adamw, sgd")
+                        help="Optimizer: musgd (default), adamw, sgd")
+    parser.add_argument("--weight-decay", type=float, default=0.05,
+                        help="Weight decay (default: 0.05)")
     parser.add_argument("--finetune", default=None,
                         help="Path to a previous model checkpoint (inference or training) to fine-tune from. "
                              "Loads model weights only — optimizer/scheduler start fresh from epoch 0. "
                              "Handles FP16 checkpoints and missing aux_head keys automatically.")
-    parser.add_argument("--pretrained-coco", action="store_true",
-                        help="Load official FlashDet COCO pretrained weights for fine-tuning "
-                             "(backbone + FPN + head regression). Much better than training from scratch.")
-    parser.add_argument("--pretrained-ckpt", default=None,
-                        help="Path to a local FlashDet COCO checkpoint file (overrides auto-download)")
     parser.add_argument("--class-file", default=None,
                         help="Path to a .txt file with class names (one per line). "
                              "Overrides annotation-based auto-detection.")
@@ -556,6 +555,8 @@ def main():
                         help="Use all visible GPUs via DDP (launch with torchrun)")
     parser.add_argument("--grad-accum", type=int, default=1,
                         help="Gradient accumulation steps (effective batch = batch_size * grad_accum)")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for reproducibility")
 
     # --- torchtune-inspired training optimizations ---
     tt_group = parser.add_argument_group("torchtune optimizations",
@@ -570,10 +571,6 @@ def main():
                           help="Use bitsandbytes 8-bit AdamW (halves optimizer memory)")
     tt_group.add_argument("--compile", action="store_true",
                           help="Apply torch.compile for faster training (requires PyTorch >= 2.0)")
-    tt_group.add_argument("--chunked-loss", action="store_true",
-                          help="Compute focal/DFL losses in chunks for lower peak memory")
-    tt_group.add_argument("--chunk-size", type=int, default=1024,
-                          help="Chunk size for chunked loss computation (default: 1024)")
 
     # --- LoRA ---
     lora_group = parser.add_argument_group("LoRA", "Low-Rank Adaptation for efficient fine-tuning")
@@ -607,7 +604,37 @@ def main():
                            help="Enable Copy-Paste augmentation (instance copying)")
 
     args = parser.parse_args()
-    
+
+    if args.config:
+        from flashdet.cfg import load_yaml_config
+        yaml_cfg = load_yaml_config(args.config)
+        defaults = parser.parse_args([])
+        if args.epochs == defaults.epochs and hasattr(yaml_cfg, "train") and hasattr(yaml_cfg.train, "epochs"):
+            args.epochs = yaml_cfg.train.epochs
+        if args.batch_size == defaults.batch_size and hasattr(yaml_cfg, "train") and hasattr(yaml_cfg.train, "batch_size"):
+            args.batch_size = yaml_cfg.train.batch_size
+        if args.lr == defaults.lr and hasattr(yaml_cfg, "train") and hasattr(yaml_cfg.train, "lr"):
+            args.lr = yaml_cfg.train.lr
+        if args.input_size == defaults.input_size and hasattr(yaml_cfg, "model") and hasattr(yaml_cfg.model, "input_size"):
+            args.input_size = yaml_cfg.model.input_size
+        if args.model_size == defaults.model_size and hasattr(yaml_cfg, "model") and hasattr(yaml_cfg.model, "size"):
+            args.model_size = yaml_cfg.model.size
+        if args.architecture == defaults.architecture and hasattr(yaml_cfg, "model") and hasattr(yaml_cfg.model, "architecture"):
+            args.architecture = yaml_cfg.model.architecture
+        if args.weight_decay == defaults.weight_decay and hasattr(yaml_cfg, "train") and hasattr(yaml_cfg.train, "weight_decay"):
+            args.weight_decay = yaml_cfg.train.weight_decay
+        if args.train_images is None and hasattr(yaml_cfg, "data") and hasattr(yaml_cfg.data, "train_images"):
+            args.train_images = yaml_cfg.data.train_images
+        if args.val_images is None and hasattr(yaml_cfg, "data") and hasattr(yaml_cfg.data, "val_images"):
+            args.val_images = yaml_cfg.data.val_images
+
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+
     model_size = args.model_size
     input_size = (args.input_size, args.input_size)
 
@@ -661,7 +688,7 @@ def main():
     num_classes = len(class_names)
 
     logger.info("=" * 60)
-    logger.info("FlashDet Training (YOLO26-based)")
+    logger.info("FlashDet Training")
     logger.info("=" * 60)
     logger.info(f"Device: {device}")
     logger.info(f"Model Size: FlashDet-{model_size.upper()}")
@@ -740,7 +767,7 @@ def main():
             num_classes=num_classes,
             size=model_size,
             total_epochs=args.epochs,
-            backbone_type=getattr(args, "backbone", "shufflenet"),
+            backbone_type=getattr(args, "backbone", "lite"),
         ).to(device)
 
         info = model.get_model_info()
@@ -759,7 +786,7 @@ def main():
         logger.info(f"Architecture: {arch}")
         logger.info(f"Total params: {total_params:,} | Trainable: {trainable:,}")
 
-    # (YOLO26-based FlashDet uses Kaiming init; pretrained backbone no longer needed)
+    # (FlashDet uses Kaiming init; pretrained backbone no longer needed)
 
     # --- torchtune: LoRA / QLoRA (apply before loading finetune/COCO weights) ---
     if args.qlora:
@@ -805,25 +832,12 @@ def main():
         logger.info(f"  Loaded {loaded} weight tensors from fine-tune checkpoint")
         if missing:
             logger.info(f"  Missing keys ({len(missing)}): {missing[:5]}{'...' if len(missing)>5 else ''}")
-            logger.info("  (expected — aux_head/aux_fpn are re-initialised for training)")
+            logger.info("  (expected — some keys may differ between training/inference checkpoints)")
         if unexpected:
             logger.warning(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}")
     elif args.finetune and args.resume:
         logger.info("--finetune ignored because --resume is set")
 
-    # COCO pretrained loading (deprecated for YOLO26-based FlashDet)
-    if args.pretrained_coco and not args.resume and not args.finetune:
-        logger.warning("--pretrained-coco is deprecated for YOLO26-based FlashDet. "
-                       "Use --finetune with a checkpoint instead. Training from scratch.")
-
-    # --- torchtune: Chunked Loss ---
-    if args.chunked_loss:
-        logger.info(f"\n--- Enabling Chunked Loss (torchtune-style, chunk_size={args.chunk_size}) ---")
-        raw_head = model.head if hasattr(model, 'head') else None
-        if raw_head is not None:
-            raw_head.use_chunked_loss = True
-            raw_head.chunk_size = args.chunk_size
-            logger.info("Chunked loss enabled on detection head")
 
     # AMP scaler (only on CUDA; GradScaler("cuda", ...) is invalid on CPU)
     use_amp = False
@@ -884,26 +898,35 @@ def main():
     base_lr = args.lr
 
     opt_type = getattr(args, "optimizer", "musgd")
+    wd = args.weight_decay
     if opt_type == "musgd" and not args.optimizer_in_bwd:
-        logger.info(f"Optimizer: MuSGD (YOLO26 default)")
+        logger.info(f"Optimizer: MuSGD")
         optimizer = build_musgd(
             raw_model,
             lr=base_lr,
             momentum=0.9,
-            weight_decay=config.train.weight_decay,
+            weight_decay=wd,
+        )
+    elif opt_type == "sgd" and not args.optimizer_in_bwd:
+        logger.info(f"Optimizer: SGD")
+        optimizer = torch.optim.SGD(
+            raw_model.parameters(),
+            lr=base_lr,
+            momentum=0.9,
+            weight_decay=wd,
         )
     else:
         optimizer = create_optimizer(
             model,
             lr=base_lr,
-            weight_decay=config.train.weight_decay,
+            weight_decay=wd,
             use_8bit=args.use_8bit_optimizer,
             optimizer_in_bwd=args.optimizer_in_bwd,
             betas=(0.9, 0.999),
         )
     
-    # LR schedule (Ultralytics style): cosine from lr0 to lr0*lrf
-    lrf = 0.01  # final LR = lr0 * 0.01 (aggressive decay like Ultralytics)
+    # LR schedule: cosine decay from lr0 to lr0*lrf
+    lrf = 0.01
 
     def one_cycle(y1=0.0, y2=1.0, steps=100):
         return lambda x: max((1 - math.cos(x * math.pi / steps)) / 2, 0) * (y2 - y1) + y1
@@ -928,7 +951,7 @@ def main():
         logger.info("Scheduler disabled (optimizer fused into backward — LR adjusted manually)")
 
     logger.info(f"Base LR: {base_lr}, Final LR: {base_lr * lrf:.6f} (lrf={lrf})")
-    logger.info(f"Weight Decay: {config.train.weight_decay}")
+    logger.info(f"Weight Decay: {wd}")
     logger.info(f"Warmup: {args.warmup_epochs} epochs (iteration-based)")
 
     # --- torchtune optimizations summary ---
@@ -943,8 +966,6 @@ def main():
         tt_flags.append("8bit_adamw")
     if args.compile:
         tt_flags.append("torch.compile")
-    if args.chunked_loss:
-        tt_flags.append(f"chunked_loss(chunk={args.chunk_size})")
     if args.qlora:
         tt_flags.append(f"QLoRA(r={args.lora_rank}, alpha={args.lora_alpha}, dtype={args.qlora_dtype})")
     elif args.lora:
@@ -1003,7 +1024,7 @@ def main():
         "architecture": arch,
     }
 
-    # Iteration-based warmup (Ultralytics style)
+    # Iteration-based warmup
     nb = len(train_loader)
     nw = max(round(args.warmup_epochs * nb), 100) if args.warmup_epochs > 0 else -1
     warmup_momentum = 0.8
@@ -1044,7 +1065,7 @@ def main():
     os.makedirs(plots_dir, exist_ok=True)
 
     for epoch in range(start_epoch, args.epochs):
-        # Step scheduler at epoch start (Ultralytics style)
+        # Step scheduler at epoch start
         if scheduler is not None:
             scheduler.step()
 
@@ -1100,9 +1121,10 @@ def main():
         history["train_cls"].append(train_losses.get("o2m_cls", train_losses.get("loss_cls", 0)))
         history["train_l1"].append(train_losses.get("o2m_l1", train_losses.get("loss_l1", 0)))
 
-        # Validate every epoch (Ultralytics style)
+        # Validate at configured interval
+        val_interval = getattr(config.train, "val_interval", 1)
         # Only rank 0 runs validation and saves checkpoints in DDP.
-        if is_main:
+        if is_main and (epoch + 1) % val_interval == 0:
             val_loss, map50, val_sub = validate(
                 raw_model, val_loader, device, logger, ema=ema, class_names=class_names
             )
@@ -1227,6 +1249,38 @@ def main():
     # Clean up activation offloading hooks
     if offload_hook is not None:
         offload_hook.remove()
+
+    # Save JSON results summary
+    import json
+    results_summary = {
+        "architecture": args.architecture,
+        "num_classes": config.model.num_classes,
+        "input_size": args.input_size,
+        "epochs_trained": epoch + 1,
+        "total_epochs": args.epochs,
+        "best_mAP50": float(best_map50),
+        "best_val_loss": float(best_loss),
+        "final_lr": float(current_lr) if 'current_lr' in dir() else None,
+        "model_params_M": sum(p.numel() for p in raw_model.parameters()) / 1e6,
+        "training_config": {
+            "batch_size": args.batch_size,
+            "learning_rate": args.lr,
+            "optimizer": args.optimizer,
+            "weight_decay": wd,
+            "amp": args.amp,
+            "grad_accum": args.grad_accum,
+            "warmup_epochs": args.warmup_epochs,
+        },
+        "history": {
+            "train_loss": history.get("train_loss", []),
+            "val_loss": history.get("val_loss", []),
+            "mAP50": history.get("mAP50", []),
+        },
+    }
+    results_path = os.path.join(args.save_dir, "results.json")
+    with open(results_path, "w") as f:
+        json.dump(results_summary, f, indent=2)
+    logger.info(f"  - results.json             (training summary)")
 
     # Final memory stats
     if device.type == "cuda":

@@ -9,10 +9,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import cv2
 import numpy as np
 
-from flashdet.trackers.byte_tracker import ByteTracker
+from flashdet.trackers import FlashTracker
+from flashdet.solutions._base import BaseSolution
 
 
-class LiveInference:
+class LiveInference(BaseSolution):
     """Run real-time object detection on a webcam or video file.
 
     This is a convenience class that wraps camera capture, detection,
@@ -22,9 +23,8 @@ class LiveInference:
     ----------
     predictor : object
         FlashDet predictor returning Nx6 detections.
-    tracker : ByteTracker | None
-        Multi-object tracker.  Pass *None* to disable tracking (raw
-        detections are drawn instead).
+    tracker : FlashTracker | None
+        Multi-object tracker.  Pass *None* to disable tracking.
     source : int | str
         Camera index (e.g. ``0``) or path to a video file.
     output_path : str | None
@@ -46,7 +46,7 @@ class LiveInference:
     def __init__(
         self,
         predictor,
-        tracker: Optional[ByteTracker] = None,
+        tracker: Optional[FlashTracker] = None,
         source: Union[int, str] = 0,
         output_path: Optional[str] = None,
         show_labels: bool = True,
@@ -56,8 +56,7 @@ class LiveInference:
         class_names: Optional[List[str]] = None,
         window_name: str = "FlashDet Live",
     ):
-        self.predictor = predictor
-        self.tracker = tracker
+        super().__init__(predictor, tracker)
         self.source = source
         self.output_path = output_path
         self.show_labels = show_labels
@@ -74,16 +73,11 @@ class LiveInference:
         self._t_prev: float = 0.0
         self._running: bool = False
 
-        # colour palette for up to 80 classes
         rng = np.random.RandomState(42)
         self._palette = [
             tuple(int(c) for c in rng.randint(60, 255, 3))
             for _ in range(80)
         ]
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def run(self, max_frames: int = 0, on_frame: Optional[Callable] = None):
         """Start the live inference loop.
@@ -91,8 +85,7 @@ class LiveInference:
         Parameters
         ----------
         max_frames : int
-            Stop after this many frames (0 = run until user presses ``q``
-            or the video ends).
+            Stop after this many frames (0 = run until ``q`` or video ends).
         on_frame : callable | None
             Optional callback ``fn(frame, detections)`` called per frame.
         """
@@ -124,23 +117,13 @@ class LiveInference:
             self.stop()
 
     def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Process a single frame (usable outside the :meth:`run` loop).
-
-        Returns
-        -------
-        annotated : np.ndarray
-            Frame with detections drawn.
-        results : dict
-            ``{"detections": [{"bbox": …, "score": …, "class_id": …,
-            "track_id": …}, …], "fps": …, "frame_idx": …}``
-        """
         self._frame_count += 1
         t_now = time.perf_counter()
         dt = t_now - self._t_prev
         self._fps = 1.0 / dt if dt > 0 else 0.0
         self._t_prev = t_now
 
-        detections = self._run_detector(frame)
+        detections = self._detect(frame)
         annotated = frame.copy()
 
         result_list: List[Dict[str, Any]] = []
@@ -195,22 +178,15 @@ class LiveInference:
         cv2.destroyAllWindows()
 
     def get_results(self) -> Dict[str, Any]:
-        """Return summary statistics."""
         return {
             "frames_processed": self._frame_count,
             "current_fps": round(self._fps, 1),
         }
 
     def reset(self):
-        """Reset frame counter and tracker state."""
+        super().reset()
         self._frame_count = 0
         self._fps = 0.0
-        if self.tracker is not None:
-            self.tracker.reset()
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _open_source(self):
         self._cap = cv2.VideoCapture(self.source)
@@ -260,11 +236,3 @@ class LiveInference:
                 (int(x1) + 2, int(y1) - 4),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
             )
-
-    def _run_detector(self, frame: np.ndarray) -> np.ndarray:
-        result = self.predictor(frame)
-        if isinstance(result, np.ndarray):
-            return result
-        if hasattr(result, "detections"):
-            return np.asarray(result.detections, dtype=np.float64)
-        return np.empty((0, 6), dtype=np.float64)

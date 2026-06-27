@@ -11,9 +11,8 @@ COPY flashdet/ flashdet/
 
 RUN pip install --no-cache-dir -e ".[all]"
 
-COPY train.py train_kd.py test.py ./
+COPY train.py test.py ./
 COPY scripts/ scripts/
-COPY configs/ configs/
 COPY examples/ examples/
 
 ENTRYPOINT ["flashdet"]

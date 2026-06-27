@@ -7,10 +7,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from flashdet.trackers.byte_tracker import ByteTracker
+from flashdet.trackers import FlashTracker
+from flashdet.solutions._base import BaseSolution
 
 
-class DistanceCalculator:
+class DistanceCalculator(BaseSolution):
     """Calculate real-world distance between detected objects.
 
     Supports two calibration modes:
@@ -25,15 +26,15 @@ class DistanceCalculator:
     ----------
     predictor : object
         FlashDet predictor returning Nx6 detections.
-    tracker : ByteTracker | None
-        Multi-object tracker.  Defaults to a fresh ``ByteTracker()``.
+    tracker : FlashTracker | None
+        Multi-object tracker.  Defaults to a fresh ``FlashTracker()``.
     pixels_per_meter : float
         Simple calibration ratio.  Ignored when *src_points* / *dst_points*
         are provided for perspective calibration.
     src_points : np.ndarray | None
-        4×2 array of calibration points in the image (pixel coords).
+        4x2 array of calibration points in the image (pixel coords).
     dst_points : np.ndarray | None
-        4×2 array of corresponding real-world positions (in metres).
+        4x2 array of corresponding real-world positions (in metres).
     classes : list[int] | None
         Only compute distances for these class IDs.
     """
@@ -41,16 +42,15 @@ class DistanceCalculator:
     def __init__(
         self,
         predictor,
-        tracker: Optional[ByteTracker] = None,
+        tracker: Optional[FlashTracker] = None,
         pixels_per_meter: float = 1.0,
         src_points: Optional[np.ndarray] = None,
         dst_points: Optional[np.ndarray] = None,
         classes: Optional[List[int]] = None,
     ):
-        self.predictor = predictor
-        self.tracker = tracker or ByteTracker()
+        super().__init__(predictor, tracker, classes)
+        self._ensure_tracker()
         self.pixels_per_meter = pixels_per_meter
-        self.classes = classes
 
         self._transform_mat: Optional[np.ndarray] = None
         if src_points is not None and dst_points is not None:
@@ -61,24 +61,8 @@ class DistanceCalculator:
         self._last_distances: np.ndarray = np.empty((0, 0), dtype=np.float64)
         self._last_ids: List[int] = []
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def process_frame(
-        self, frame: np.ndarray
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Process one frame and compute pairwise distances.
-
-        Returns
-        -------
-        annotated : np.ndarray
-            Frame with bounding boxes and distance lines drawn.
-        results : dict
-            ``{"ids": […], "distance_matrix": 2-D list,
-            "pairs": [{"id_a": …, "id_b": …, "distance_m": …}, …]}``
-        """
-        detections = self._run_detector(frame)
+    def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
+        detections = self._detect(frame)
         tracks = self.tracker.update(detections)
 
         annotated = frame.copy()
@@ -88,7 +72,7 @@ class DistanceCalculator:
         for trk in tracks:
             x1, y1, x2, y2, tid, score, cls = trk
             tid, cls = int(tid), int(cls)
-            if self.classes is not None and cls not in self.classes:
+            if not self._filter_class(cls):
                 continue
 
             cx = (x1 + x2) / 2.0
@@ -114,7 +98,6 @@ class DistanceCalculator:
                 dist_matrix[i, j] = d
                 dist_matrix[j, i] = d
 
-        # Draw top-k closest pairs
         pairs = self._sorted_pairs(track_ids, dist_matrix)
         for pair in pairs[:10]:
             ia = track_ids.index(pair["id_a"])
@@ -135,7 +118,6 @@ class DistanceCalculator:
         return annotated, self.get_results()
 
     def get_results(self) -> Dict[str, Any]:
-        """Return the latest distance matrix and pair list."""
         pairs = self._sorted_pairs(self._last_ids, self._last_distances)
         return {
             "ids": list(self._last_ids),
@@ -143,56 +125,31 @@ class DistanceCalculator:
             "pairs": pairs,
         }
 
-    def calibrate(
-        self,
-        src_points: np.ndarray,
-        dst_points: np.ndarray,
-    ):
-        """Set or update the perspective calibration.
-
-        Parameters
-        ----------
-        src_points : np.ndarray
-            4×2 image-space calibration points.
-        dst_points : np.ndarray
-            4×2 real-world calibration points (metres).
-        """
+    def calibrate(self, src_points: np.ndarray, dst_points: np.ndarray):
+        """Set or update the perspective calibration."""
         src = np.asarray(src_points, dtype=np.float32).reshape(4, 2)
         dst = np.asarray(dst_points, dtype=np.float32).reshape(4, 2)
         self._transform_mat = cv2.getPerspectiveTransform(src, dst)
 
     def reset(self):
-        """Clear cached results."""
+        super().reset()
         self._last_distances = np.empty((0, 0), dtype=np.float64)
         self._last_ids = []
-        self.tracker.reset()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _to_real_world(
-        self, points_px: List[Tuple[float, float]]
-    ) -> List[Tuple[float, float]]:
-        """Convert pixel coordinates to real-world coordinates."""
+    def _to_real_world(self, points_px: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
         if not points_px:
             return []
-
         if self._transform_mat is not None:
             pts = np.array(points_px, dtype=np.float32).reshape(-1, 1, 2)
             transformed = cv2.perspectiveTransform(pts, self._transform_mat)
             return [(float(p[0][0]), float(p[0][1])) for p in transformed]
-
         return [
             (px / self.pixels_per_meter, py / self.pixels_per_meter)
             for px, py in points_px
         ]
 
     @staticmethod
-    def _sorted_pairs(
-        ids: List[int], dist_matrix: np.ndarray
-    ) -> List[Dict[str, Any]]:
-        """Build a sorted list of pairwise distances."""
+    def _sorted_pairs(ids: List[int], dist_matrix: np.ndarray) -> List[Dict[str, Any]]:
         n = len(ids)
         pairs: List[Dict[str, Any]] = []
         for i in range(n):
@@ -204,11 +161,3 @@ class DistanceCalculator:
                 })
         pairs.sort(key=lambda p: p["distance_m"])
         return pairs
-
-    def _run_detector(self, frame: np.ndarray) -> np.ndarray:
-        result = self.predictor(frame)
-        if isinstance(result, np.ndarray):
-            return result
-        if hasattr(result, "detections"):
-            return np.asarray(result.detections, dtype=np.float64)
-        return np.empty((0, 6), dtype=np.float64)

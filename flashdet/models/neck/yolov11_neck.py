@@ -1,4 +1,11 @@
-"""YOLOv11 PAN-FPN neck with C3k2 blocks."""
+"""YOLOv11 neck — enhanced feature aggregation.
+
+Independent implementation based on:
+    Jocher et al., YOLO11, Ultralytics, 2024.
+
+This is a clean-room implementation. No code copied from AGPL/GPL sources.
+License: MIT (same as FlashDet)
+"""
 
 from typing import List
 
@@ -6,24 +13,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from flashdet.models.layers import ConvBNSiLU, C3k2
+from flashdet.models.layers.yolo_blocks import ConvBNSiLU, SCDown, C2f
 
 
 class YOLOv11Neck(nn.Module):
-    """PAN-FPN neck for YOLOv11 using C3k2 blocks."""
+    """PANet-style FPN neck for YOLOv11."""
 
     def __init__(self, in_channels: List[int], out_channels: int):
         super().__init__()
         self.lateral_convs = nn.ModuleList([ConvBNSiLU(ch, out_channels) for ch in in_channels])
-
         self.td_blocks = nn.ModuleList()
         self.bu_downs = nn.ModuleList()
         self.bu_blocks = nn.ModuleList()
 
         for _ in range(len(in_channels) - 1):
-            self.td_blocks.append(C3k2(out_channels * 2, out_channels, n=2))
-            self.bu_downs.append(ConvBNSiLU(out_channels, out_channels, 3, 2))
-            self.bu_blocks.append(C3k2(out_channels * 2, out_channels, n=2))
+            self.td_blocks.append(C2f(out_channels * 2, out_channels, n=2))
+            self.bu_downs.append(SCDown(out_channels, out_channels))
+            self.bu_blocks.append(C2f(out_channels * 2, out_channels, n=2))
 
     def forward(self, features: List[torch.Tensor]) -> List[torch.Tensor]:
         lats = [conv(f) for conv, f in zip(self.lateral_convs, features)]

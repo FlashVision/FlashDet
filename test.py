@@ -11,11 +11,17 @@ Usage:
     python test.py --model checkpoint.pth --video test.mp4
     python test.py --model checkpoint.pth --camera 0
 
+    # Video with tracking
+    python test.py --model checkpoint.pth --video test.mp4 --tracker bytetrack
+    python test.py --model checkpoint.pth --video test.mp4 --tracker deepsort --max-age 50
+
+    # Video with a solution (auto-creates tracker if not specified)
+    python test.py --model checkpoint.pth --video test.mp4 --solution heatmap
+    python test.py --model checkpoint.pth --video test.mp4 --solution counter --tracker ocsort
+
     # Evaluate on validation set with GT comparison visualizations
     python test.py --model checkpoint.pth --eval --output workspace/eval_vis/
 
-    # Quick test with COCO pretrained weights (no training needed)
-    python test.py --pretrained-coco --image test.jpg --model-size m --input-size 416
 """
 
 import os
@@ -30,115 +36,215 @@ import numpy as np
 import torch
 
 from flashdet.cfg import get_config
-from flashdet.models import FlashDet, load_coco_pretrained
+from flashdet.models import FlashDet
 from flashdet.models.detector import build_model
 from flashdet.data.transforms import InferenceTransform
 from flashdet.utils import draw_detections, load_checkpoint
 from flashdet.utils.visualization import make_gt_pred_panel, draw_boxes, make_color_palette
 
 
-class FlashDetDetector:
-    """Inference wrapper supporting all FlashDet architectures.
+# ──────────────────────────────────────────────────────
+#  Tracker factory
+# ──────────────────────────────────────────────────────
 
-    Class names and architecture type are read from the checkpoint's embedded
-    'config' dict so that models trained on any dataset always display the
-    correct labels without any code changes.
+def _create_tracker(name, max_age=30, min_hits=3, iou_threshold=0.3):
+    """Create a tracker by name."""
+    from flashdet.trackers import (
+        SortTracker, ByteTracker, BoTSortTracker,
+        DeepSortTracker, OCSortTracker, StrongSortTracker,
+    )
+    tracker_map = {
+        "sort": SortTracker,
+        "bytetrack": ByteTracker,
+        "botsort": BoTSortTracker,
+        "deepsort": DeepSortTracker,
+        "ocsort": OCSortTracker,
+        "strongsort": StrongSortTracker,
+    }
+    cls = tracker_map[name]
+    return cls(max_age=max_age, min_hits=min_hits, iou_threshold=iou_threshold)
+
+
+# ──────────────────────────────────────────────────────
+#  Solution factory
+# ──────────────────────────────────────────────────────
+
+def _create_solution(name, predictor, tracker):
+    """Create a solution by name."""
+    from flashdet.solutions import (
+        ObjectCounter, Heatmap, SpeedEstimator, DistanceCalculator,
+        RegionCounter, QueueManager, ParkingManager, SecurityAlarm,
+        WorkoutMonitor, ObjectBlurrer, ObjectCropper, CrowdDensity,
+        DwellTimeAnalyzer, TrafficFlow, TrajectoryVisualizer,
+    )
+    solution_map = {
+        "counter": ObjectCounter,
+        "heatmap": Heatmap,
+        "speed": SpeedEstimator,
+        "distance": DistanceCalculator,
+        "region": RegionCounter,
+        "queue": QueueManager,
+        "parking": ParkingManager,
+        "security": SecurityAlarm,
+        "workout": WorkoutMonitor,
+        "blur": ObjectBlurrer,
+        "crop": ObjectCropper,
+        "crowd": CrowdDensity,
+        "dwell": DwellTimeAnalyzer,
+        "traffic": TrafficFlow,
+        "trajectory": TrajectoryVisualizer,
+    }
+    cls = solution_map[name]
+    return cls(predictor=predictor, tracker=tracker)
+
+
+# ──────────────────────────────────────────────────────
+#  Tracking visualization helpers
+# ──────────────────────────────────────────────────────
+
+_TRACK_COLORS = {}
+_TRACK_TRAILS = {}
+_TRAIL_LENGTH = 30
+
+
+def _get_track_color(track_id):
+    """Return a consistent BGR color for a track ID."""
+    if track_id not in _TRACK_COLORS:
+        rng = np.random.RandomState(int(track_id) * 7 + 13)
+        _TRACK_COLORS[track_id] = tuple(int(c) for c in rng.randint(60, 255, 3))
+    return _TRACK_COLORS[track_id]
+
+
+def _draw_tracks(frame, tracks, class_names=None):
+    """Draw tracked boxes with IDs and trails.
+
+    Parameters
+    ----------
+    frame : np.ndarray
+        BGR image to draw on (modified in place).
+    tracks : np.ndarray
+        Mx7 array ``[x1, y1, x2, y2, track_id, score, class_id]``.
+    class_names : list[str] | None
+        Class names for label display.
+    """
+    for trk in tracks:
+        x1, y1, x2, y2 = int(trk[0]), int(trk[1]), int(trk[2]), int(trk[3])
+        track_id = int(trk[4])
+        score = float(trk[5])
+        cls_id = int(trk[6])
+        color = _get_track_color(track_id)
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+        cls_label = class_names[cls_id] if class_names and cls_id < len(class_names) else f"cls{cls_id}"
+        label = f"{cls_label} #{track_id} {score:.2f}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw, y1), color, -1)
+        cv2.putText(frame, label, (x1, y1 - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        if track_id not in _TRACK_TRAILS:
+            _TRACK_TRAILS[track_id] = []
+        _TRACK_TRAILS[track_id].append((cx, cy))
+        if len(_TRACK_TRAILS[track_id]) > _TRAIL_LENGTH:
+            _TRACK_TRAILS[track_id] = _TRACK_TRAILS[track_id][-_TRAIL_LENGTH:]
+
+        pts = _TRACK_TRAILS[track_id]
+        if len(pts) > 1:
+            for i in range(1, len(pts)):
+                thickness = max(1, int(i * 2 / len(pts)))
+                cv2.line(frame, pts[i - 1], pts[i], color, thickness)
+
+    return frame
+
+
+class FlashDetDetector:
+    """Inference wrapper for FlashDet models.
+
+    Class names are read from the checkpoint's embedded 'config' dict so
+    that models trained on any dataset always display the correct labels.
     """
 
     def __init__(
         self,
-        model_path: str = None,
+        model_path: str,
         device: str = "cuda",
         conf_thresh: float = 0.35,
         nms_thresh: float = 0.4,
-        pretrained_coco: bool = False,
-        model_size: str = "m",
-        input_size: int = 416,
+        input_size: int = None,
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.conf_thresh = conf_thresh
         self.nms_thresh = nms_thresh
+        self.class_filter = None
 
         config = get_config()
 
-        if pretrained_coco:
-            COCO_NAMES = [
-                "person", "bicycle", "car", "motorcycle", "airplane", "bus",
-                "train", "truck", "boat", "traffic light", "fire hydrant",
-                "stop sign", "parking meter", "bench", "bird", "cat", "dog",
-                "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
-                "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-                "skis", "snowboard", "sports ball", "kite", "baseball bat",
-                "baseball glove", "skateboard", "surfboard", "tennis racket",
-                "bottle", "wine glass", "cup", "fork", "knife", "spoon",
-                "bowl", "banana", "apple", "sandwich", "orange", "broccoli",
-                "carrot", "hot dog", "pizza", "donut", "cake", "chair",
-                "couch", "potted plant", "bed", "dining table", "toilet",
-                "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-                "microwave", "oven", "toaster", "sink", "refrigerator", "book",
-                "clock", "vase", "scissors", "teddy bear", "hair drier",
-                "toothbrush",
-            ]
-            self.CLASS_NAMES = COCO_NAMES
-            self.input_size = (input_size, input_size)
+        if model_path is None:
+            raise ValueError("--model is required")
 
-            self.model = FlashDet(
-                num_classes=80,
-                size=model_size if model_size in ("n", "s", "m", "l", "x") else "n",
+        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+
+        num_classes   = config.model.num_classes
+        inp_size      = config.model.input_size
+        class_names   = list(config.class_names)
+        arch = "flashdet"
+        ckpt_model_size = "n"
+
+        if "config" in checkpoint:
+            ckpt_cfg = checkpoint["config"]
+            num_classes   = ckpt_cfg.get("num_classes", num_classes)
+            inp_size      = ckpt_cfg.get("input_size", inp_size)
+            arch          = ckpt_cfg.get("architecture", "flashdet")
+            ckpt_model_size = ckpt_cfg.get("model_size", "n")
+            if "class_names" in ckpt_cfg and ckpt_cfg["class_names"]:
+                class_names = ckpt_cfg["class_names"]
+            print(f"Detected from checkpoint: arch={arch}, size={ckpt_model_size}, classes={num_classes}")
+
+        if len(class_names) != num_classes:
+            print(
+                f"[WARN] class_names ({len(class_names)}) != num_classes ({num_classes}). "
+                "Falling back to generic labels."
             )
-            print(f"COCO pretrained model loaded ({model_size}, {input_size}px, 80 classes)")
+            class_names = [f"class_{i}" for i in range(num_classes)]
 
+        self.CLASS_NAMES = class_names
+        self.input_size = input_size if input_size is not None else inp_size
+
+        print(f"Loading model: {model_path}")
+
+        sd_for_load = (
+            checkpoint.get("model_state_dict")
+            or checkpoint.get("state_dict")
+            or checkpoint
+        )
+        backbone_type = "lite"
+        if "config" in checkpoint:
+            backbone_type = checkpoint["config"].get("backbone_type", "lite")
+        if backbone_type == "lite":
+            sd_keys = list(sd_for_load.keys())
+            if any(k.startswith("backbone.stem.") or k.startswith("backbone.stages.") for k in sd_keys):
+                backbone_type = "repnext"
+
+        arch = arch.lower()
+        if arch in ("flashdet", ""):
+            self.model = FlashDet(
+                num_classes=num_classes,
+                size=ckpt_model_size,
+                backbone_type=backbone_type,
+            )
         else:
-            if model_path is None:
-                raise ValueError("Either --model or --pretrained-coco is required")
+            config.model.num_classes = num_classes
+            self.model = build_model(config, architecture=arch)
 
-            checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
-
-            num_classes   = config.model.num_classes
-            inp_size      = config.model.input_size
-            class_names   = list(config.class_names)
-            arch = "flashdet"
-            ckpt_model_size = "n"
-
-            if "config" in checkpoint:
-                ckpt_cfg = checkpoint["config"]
-                num_classes   = ckpt_cfg.get("num_classes", num_classes)
-                inp_size      = ckpt_cfg.get("input_size", inp_size)
-                arch          = ckpt_cfg.get("architecture", "flashdet")
-                ckpt_model_size = ckpt_cfg.get("model_size", "n")
-                if "class_names" in ckpt_cfg and ckpt_cfg["class_names"]:
-                    class_names = ckpt_cfg["class_names"]
-                print(f"Detected from checkpoint: arch={arch}, size={ckpt_model_size}, classes={num_classes}")
-
-            if len(class_names) != num_classes:
-                print(
-                    f"[WARN] class_names ({len(class_names)}) != num_classes ({num_classes}). "
-                    "Falling back to generic labels."
-                )
-                class_names = [f"class_{i}" for i in range(num_classes)]
-
-            self.CLASS_NAMES = class_names
-            self.input_size = inp_size
-
-            print(f"Loading model: {model_path}")
-
-            arch = arch.lower()
-            if arch in ("flashdet", ""):
-                self.model = FlashDet(
-                    num_classes=num_classes,
-                    size=ckpt_model_size,
-                )
-            else:
-                config.model.num_classes = num_classes
-                self.model = build_model(config, architecture=arch)
-
-            if "model_state_dict" in checkpoint:
-                self.model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-            elif "state_dict" in checkpoint:
-                sd = {k.replace("model.", ""): v for k, v in checkpoint["state_dict"].items()}
-                self.model.load_state_dict(sd, strict=False)
-            else:
-                self.model.load_state_dict(checkpoint, strict=False)
+        if "model_state_dict" in checkpoint:
+            self.model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        elif "state_dict" in checkpoint:
+            sd = {k.replace("model.", ""): v for k, v in checkpoint["state_dict"].items()}
+            self.model.load_state_dict(sd, strict=False)
+        else:
+            self.model.load_state_dict(checkpoint, strict=False)
 
         self.model = self.model.to(self.device).eval()
         self.transform = InferenceTransform(input_size=self.input_size)
@@ -163,7 +269,7 @@ class FlashDetDetector:
         tensor, meta = self.transform(rgb)
         tensor = torch.from_numpy(tensor).unsqueeze(0).to(self.device)
 
-        results = self.model.predict(tensor, None, self.conf_thresh, self.nms_thresh)
+        results = self.model.predict(tensor, None, score_thr=self.conf_thresh)
 
         warp_matrix = meta["warp_matrix"]
         inv_warp = np.linalg.inv(warp_matrix)
@@ -194,21 +300,11 @@ class FlashDetDetector:
                         x1s[i], y1s[i], x2s[i], y2s[i]
                     ))
 
+        if self.class_filter:
+            detections = [d for d in detections if d[0] in self.class_filter]
+
         return detections
 
-    @staticmethod
-    def count_violations(detections, violation_classes=None, safe_classes=None):
-        if violation_classes is None:
-            violation_classes = ["NO-Hardhat", "NO-Mask", "NO-Safety Vest"]
-        if safe_classes is None:
-            safe_classes = ["Hardhat", "Mask", "Safety Vest"]
-        violations, safe = [], []
-        for det in detections:
-            if det[0] in violation_classes:
-                violations.append(det)
-            elif det[0] in safe_classes:
-                safe.append(det)
-        return violations, safe
 
 
 # ──────────────────────────────────────────────────────
@@ -319,8 +415,16 @@ def process_eval(detector, output_dir):
     print(f"Done — {total} panels saved to {output_dir}")
 
 
-def process_video(detector, video_path, output_dir, show=False):
-    """Process video file."""
+def _tracker_accepts_frame(tracker):
+    """Check if tracker.update() accepts a frame argument (appearance-based trackers)."""
+    import inspect
+    sig = inspect.signature(tracker.update)
+    params = list(sig.parameters.keys())
+    return len(params) >= 3 or "frame" in params
+
+
+def process_video(detector, video_path, output_dir, show=False, tracker=None, solution=None):
+    """Process video file with optional tracking or solution."""
     print(f"\nProcessing video: {video_path}")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -346,10 +450,25 @@ def process_video(detector, video_path, output_dir, show=False):
             break
 
         start = time.time()
-        detections = detector.detect(frame)
+
+        if solution is not None:
+            output, _ = solution.process_frame(frame)
+        elif tracker is not None:
+            detections = detector.detect(frame)
+            det_array = np.array(
+                [[d[2], d[3], d[4], d[5], d[1],
+                  detector.CLASS_NAMES.index(d[0]) if d[0] in detector.CLASS_NAMES else 0]
+                 for d in detections],
+                dtype=np.float64,
+            ) if detections else np.empty((0, 6), dtype=np.float64)
+            tracks = tracker.update(det_array, frame) if _tracker_accepts_frame(tracker) else tracker.update(det_array)
+            output = _draw_tracks(frame.copy(), tracks, detector.CLASS_NAMES)
+        else:
+            detections = detector.detect(frame)
+            output = draw_detections(frame, detections)
+
         total_time += time.time() - start
 
-        output = draw_detections(frame, detections)
         current_fps = frame_count / total_time if total_time > 0 else 0
         cv2.putText(output, f"FPS: {current_fps:.1f}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
@@ -374,8 +493,8 @@ def process_video(detector, video_path, output_dir, show=False):
     print(f"  Average FPS: {avg_fps:.1f}  |  Saved: {output_path}")
 
 
-def process_camera(detector, camera_id, output_dir=None):
-    """Process live camera feed."""
+def process_camera(detector, camera_id, output_dir=None, tracker=None, solution=None):
+    """Process live camera feed with optional tracking or solution."""
     print(f"\nStarting camera: {camera_id}")
     print("Press 'q' to quit, 's' to screenshot")
 
@@ -395,18 +514,26 @@ def process_camera(detector, camera_id, output_dir=None):
         if not ret:
             break
 
-        detections = detector.detect(frame)
-        output = draw_detections(frame, detections)
+        if solution is not None:
+            output, _ = solution.process_frame(frame)
+        elif tracker is not None:
+            detections = detector.detect(frame)
+            det_array = np.array(
+                [[d[2], d[3], d[4], d[5], d[1],
+                  detector.CLASS_NAMES.index(d[0]) if d[0] in detector.CLASS_NAMES else 0]
+                 for d in detections],
+                dtype=np.float64,
+            ) if detections else np.empty((0, 6), dtype=np.float64)
+            tracks = tracker.update(det_array, frame) if _tracker_accepts_frame(tracker) else tracker.update(det_array)
+            output = _draw_tracks(frame.copy(), tracks, detector.CLASS_NAMES)
+        else:
+            detections = detector.detect(frame)
+            output = draw_detections(frame, detections)
 
         elapsed = time.time() - start_time
         fps = frame_count / elapsed if elapsed > 0 else 0
         cv2.putText(output, f"FPS: {fps:.1f}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-        violations, _ = detector.count_violations(detections)
-        if violations:
-            cv2.putText(output, f"VIOLATIONS: {len(violations)}", (10, 70),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
         cv2.imshow("FlashDet — Press Q to quit", output)
 
@@ -422,6 +549,7 @@ def process_camera(detector, camera_id, output_dir=None):
 
     cap.release()
     cv2.destroyAllWindows()
+
 
 
 # ──────────────────────────────────────────────────────
@@ -441,29 +569,60 @@ def main():
     parser.add_argument("--nms", type=float, default=0.4, help="NMS IoU threshold")
     parser.add_argument("--device", default="cuda", help="Device")
     parser.add_argument("--show", action="store_true", help="Show output window")
-    parser.add_argument("--pretrained-coco", action="store_true",
-                        help="Use official COCO pretrained weights (80 classes, no fine-tuning)")
-    parser.add_argument("--model-size", default="n", choices=["n", "s", "m", "l", "x"],
-                        help="Model size (only used with --pretrained-coco)")
-    parser.add_argument("--input-size", type=int, default=416,
-                        help="Input resolution (only used with --pretrained-coco)")
+
+    parser.add_argument("--tracker", default=None,
+        choices=["sort", "bytetrack", "botsort", "deepsort", "ocsort", "strongsort"],
+        help="Enable tracking with specified algorithm (for video/camera)")
+    parser.add_argument("--max-age", type=int, default=30,
+        help="Tracker: max frames to keep lost tracks")
+    parser.add_argument("--min-hits", type=int, default=3,
+        help="Tracker: min detections before track confirmed")
+    parser.add_argument("--iou-threshold", type=float, default=0.3,
+        help="Tracker: IoU matching threshold")
+
+    parser.add_argument("--solution", default=None,
+        choices=["counter", "heatmap", "speed", "distance", "region", "queue",
+                 "parking", "security", "workout", "blur", "crop", "crowd",
+                 "dwell", "traffic", "trajectory"],
+        help="Run a solution (for video/camera). Requires --tracker unless solution is detection-only.")
+    parser.add_argument("--classes", nargs="+", default=None,
+        help="Filter classes (e.g. --classes person car)")
+    parser.add_argument("--input-size", type=int, default=None,
+        help="Override input size from checkpoint")
+
     args = parser.parse_args()
 
     if not any([args.image, args.video, args.camera is not None, args.eval]):
         parser.error("Specify --image, --video, --camera, or --eval")
 
-    if not args.pretrained_coco and args.model is None:
-        parser.error("Either --model or --pretrained-coco is required")
+    if args.model is None:
+        parser.error("--model is required")
 
     detector = FlashDetDetector(
         model_path=args.model,
         device=args.device,
         conf_thresh=args.conf,
         nms_thresh=args.nms,
-        pretrained_coco=args.pretrained_coco,
-        model_size=args.model_size,
         input_size=args.input_size,
     )
+
+    if args.classes:
+        detector.class_filter = set(args.classes)
+
+    tracker = None
+    if args.tracker and (args.video or args.camera is not None):
+        tracker = _create_tracker(args.tracker, args.max_age, args.min_hits, args.iou_threshold)
+
+    solution = None
+    if args.solution and (args.video or args.camera is not None):
+        from flashdet.engine.inference import Predictor
+        predictor = Predictor(
+            model_path=args.model, device=args.device,
+            conf_thresh=args.conf, nms_thresh=args.nms,
+        )
+        if tracker is None:
+            tracker = _create_tracker("sort", args.max_age, args.min_hits, args.iou_threshold)
+        solution = _create_solution(args.solution, predictor, tracker)
 
     if args.eval:
         process_eval(detector, args.output)
@@ -475,9 +634,11 @@ def main():
         else:
             process_image(detector, args.image, args.output)
     elif args.video:
-        process_video(detector, args.video, args.output, args.show)
+        process_video(detector, args.video, args.output, args.show,
+                      tracker=tracker, solution=solution)
     elif args.camera is not None:
-        process_camera(detector, args.camera, args.output)
+        process_camera(detector, args.camera, args.output,
+                       tracker=tracker, solution=solution)
 
 
 if __name__ == "__main__":

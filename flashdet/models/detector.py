@@ -1,74 +1,64 @@
 """
-Model builder for FlashDet.
+Model builder — registry-based multi-architecture support.
 """
 
 import logging
-import warnings
-from typing import Dict
 
 from flashdet.models.architectures.flashdet import FlashDet
+import flashdet.models.architectures  # trigger all @DETECTORS registrations
+from flashdet.registry import DETECTORS
 
 logger = logging.getLogger(__name__)
 
 
-def load_coco_pretrained(model, **kwargs) -> Dict[str, list]:
-    """Compatibility stub — YOLO26-based FlashDet uses standard checkpoint loading.
-
-    The old NanoDet-specific COCO pretrained loader is no longer needed.
-    Use ``torch.load`` / ``model.load_state_dict`` for checkpoints instead.
-    """
-    warnings.warn(
-        "load_coco_pretrained() is deprecated for YOLO26-based FlashDet. "
-        "Use standard checkpoint loading (torch.load + load_state_dict).",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return {"loaded": [], "skipped": []}
-
-ARCHITECTURE_REGISTRY = {
-    "flashdet": "FlashDet",
-    "detr": "DETR",
-    "rt-detr": "RTDETR",
-    "rtdetr": "RTDETR",
-    "yolov9": "YOLOv9",
-    "yolov10": "YOLOv10",
-    "yolov11": "YOLOv11",
-    "grounding-dino": "GroundingDINO",
-    "groundingdino": "GroundingDINO",
-}
-
-
 def build_model(config, architecture: str = None):
-    """Build a detection model from config.
+    """Build a detection model from config using the DETECTORS registry.
+
+    Supports: flashdet, yolov8, yolov9, yolov10, yolov11, yolox.
 
     Args:
-        config: Model configuration.
-        architecture: Architecture name. If ``None`` or ``"flashdet"``,
-            builds the YOLO26-based FlashDet model. Other options:
-            ``"detr"``, ``"rt-detr"``, ``"yolov9"``, ``"yolov10"``,
-            ``"yolov11"``, ``"grounding-dino"``.
-
-    Returns:
-        An ``nn.Module`` with ``forward(x, gt_meta)`` and ``predict(x)`` interfaces.
+        config: Config object with model.num_classes, model.size, epochs, etc.
+        architecture: Architecture name (case-insensitive). Defaults to 'flashdet'.
     """
-    arch = (architecture or getattr(config.model, "architecture", "flashdet")).lower()
+    arch = (architecture or "flashdet").lower().strip()
+    num_classes = config.model.num_classes
+    total_epochs = getattr(config, "total_epochs", getattr(config, "epochs", 100))
 
     if arch in ("flashdet", ""):
         size = getattr(config.model, "size", "n")
-        total_epochs = getattr(config, "total_epochs", getattr(config, "epochs", 100))
-        return FlashDet(
-            num_classes=config.model.num_classes,
-            size=size,
-            total_epochs=total_epochs,
-        )
+        return FlashDet(num_classes=num_classes, size=size, total_epochs=total_epochs)
 
-    class_name = ARCHITECTURE_REGISTRY.get(arch)
-    if class_name is None:
-        available = ", ".join(sorted(ARCHITECTURE_REGISTRY.keys()))
+    # YOLO-family models
+    width_mult = getattr(config.model, "width_mult", 1.0)
+    depth_mult = getattr(config.model, "depth_mult", 1.0)
+    reg_max = getattr(config.model, "reg_max", 16)
+
+    arch_map = {
+        "yolov8": "YOLOv8",
+        "yolov9": "YOLOv9",
+        "yolov10": "YOLOv10",
+        "yolov11": "YOLOv11",
+        "yolox": "YOLOX",
+    }
+
+    registry_name = arch_map.get(arch)
+    if registry_name is None:
+        available = list(DETECTORS._registry.keys())
         raise ValueError(f"Unknown architecture '{arch}'. Available: {available}")
 
-    from flashdet.registry import DETECTORS
-    cls = DETECTORS.get(class_name)
-    num_classes = config.model.num_classes
+    kwargs = {"num_classes": num_classes, "width_mult": width_mult, "depth_mult": depth_mult}
+    if arch == "yolov8":
+        kwargs["reg_max"] = reg_max
+    elif arch == "yolov9":
+        kwargs["use_pgi"] = getattr(config.model, "use_pgi", True)
+        kwargs["reg_max"] = reg_max
+    elif arch == "yolov10":
+        kwargs["use_psa"] = getattr(config.model, "use_psa", True)
+        kwargs["reg_max"] = reg_max
+    elif arch == "yolov11":
+        kwargs["use_c2psa"] = getattr(config.model, "use_c2psa", True)
+        kwargs["reg_max"] = reg_max
 
-    return cls(num_classes=num_classes)
+    model = DETECTORS.build(registry_name, **kwargs)
+    logger.info(f"Built {registry_name} (num_classes={num_classes}, width={width_mult}, depth={depth_mult})")
+    return model

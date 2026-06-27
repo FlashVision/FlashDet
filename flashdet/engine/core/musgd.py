@@ -1,5 +1,5 @@
 """
-MuSGD — Hybrid Muon-SGD Optimizer for YOLO26-based FlashDet.
+MuSGD — Hybrid Muon-SGD Optimizer for FlashDet.
 
 Combines Muon (momentum + Newton-Schulz orthogonalization) with
 standard SGD-momentum:
@@ -8,7 +8,6 @@ standard SGD-momentum:
   - Parameters with ndim < 2 (biases, BN scale/shift): pure SGD.
 
 Reference:
-    Ultralytics YOLO26 (2026), Section 3.3.1.
     Muon optimizer: Jordan et al., 2024.
 """
 

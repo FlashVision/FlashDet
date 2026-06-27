@@ -1,5 +1,5 @@
 """
-Small-Target-Aware Label Assignment (STAL) for YOLO26-based FlashDet.
+Small-Target-Aware Label Assignment (STAL) for FlashDet.
 
 Implements Task-Aligned Assignment with small-target protection:
   - TAL scoring: alignment = cls_score^alpha * iou^beta
@@ -7,52 +7,21 @@ Implements Task-Aligned Assignment with small-target protection:
     expands them to s_ref during candidate selection only, ensuring
     at least a few anchor centers fall inside and preventing
     zero-positive supervision.
-
-Reference:
-    Ultralytics YOLO26 (2026), Section 3.3.3.
 """
 
 import torch
 import torch.nn.functional as F
 from typing import Tuple, Optional
 
+from flashdet.utils.bbox import bbox_iou_aligned
+
+# Backward-compatible alias
+_bbox_iou_aligned = bbox_iou_aligned
+
 
 def _xyxy_to_cxcywh(boxes: torch.Tensor) -> torch.Tensor:
     x1, y1, x2, y2 = boxes.unbind(-1)
     return torch.stack([(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1], dim=-1)
-
-
-def _bbox_iou_aligned(box1: torch.Tensor, box2: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
-    """CIoU between aligned pairs [N,4] in xyxy format."""
-    inter_x1 = torch.max(box1[:, 0], box2[:, 0])
-    inter_y1 = torch.max(box1[:, 1], box2[:, 1])
-    inter_x2 = torch.min(box1[:, 2], box2[:, 2])
-    inter_y2 = torch.min(box1[:, 3], box2[:, 3])
-    inter = (inter_x2 - inter_x1).clamp(0) * (inter_y2 - inter_y1).clamp(0)
-
-    area1 = (box1[:, 2] - box1[:, 0]) * (box1[:, 3] - box1[:, 1])
-    area2 = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
-    union = area1 + area2 - inter + eps
-    iou = inter / union
-
-    enclose_x1 = torch.min(box1[:, 0], box2[:, 0])
-    enclose_y1 = torch.min(box1[:, 1], box2[:, 1])
-    enclose_x2 = torch.max(box1[:, 2], box2[:, 2])
-    enclose_y2 = torch.max(box1[:, 3], box2[:, 3])
-    c2 = (enclose_x2 - enclose_x1) ** 2 + (enclose_y2 - enclose_y1) ** 2 + eps
-    cx1, cy1 = (box1[:, 0] + box1[:, 2]) / 2, (box1[:, 1] + box1[:, 3]) / 2
-    cx2, cy2 = (box2[:, 0] + box2[:, 2]) / 2, (box2[:, 1] + box2[:, 3]) / 2
-    rho2 = (cx1 - cx2) ** 2 + (cy1 - cy2) ** 2
-
-    w1, h1 = box1[:, 2] - box1[:, 0], box1[:, 3] - box1[:, 1]
-    w2, h2 = box2[:, 2] - box2[:, 0], box2[:, 3] - box2[:, 1]
-    import math
-    v = (4 / (math.pi ** 2)) * (torch.atan(w2 / (h2 + eps)) - torch.atan(w1 / (h1 + eps))) ** 2
-    with torch.no_grad():
-        alpha_ciou = v / (1 - iou + v + eps)
-
-    ciou = iou - rho2 / c2 - alpha_ciou * v
-    return ciou
 
 
 def _pairwise_iou(box1: torch.Tensor, box2: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
@@ -231,8 +200,7 @@ class STALAssigner:
 
         pos_labels_onehot = F.one_hot(gt_labels[matched_gt_idx], num_classes).float()
 
-        # Soft labels for both heads — matches Ultralytics TaskAlignedAssigner
-        # target_scores = one_hot * norm_align_metric
+        # Soft labels for both heads (target_scores = one_hot * norm_align_metric)
         # where norm_align_metric = (alignment * max_overlap_per_gt) / (max_alignment_per_gt + eps)
         pos_alignment = matching_matrix[fg_mask].max(dim=1).values
         pos_iou = pair_iou[fg_mask, matched_gt_idx]
@@ -240,23 +208,5 @@ class STALAssigner:
         gt_max = max_align_per_gt[matched_gt_idx].clamp(min=self.eps)
         norm_align = (pos_alignment / gt_max * pos_iou).clamp(min=0.05)
         assigned_scores[fg_mask] = pos_labels_onehot * norm_align[:, None]
-
-        # #region agent log
-        import os as _os4, json as _json4, time as _time4
-        _lp4 = _os4.path.join(_os4.path.dirname(_os4.path.dirname(_os4.path.dirname(_os4.path.abspath(__file__)))), "debug-387c01.log")
-        if not hasattr(self, '_dbg_assign_logged'):
-            self._dbg_assign_logged = True
-            n_pos = fg_mask.sum().item()
-            try:
-                _data = {"branch":"o2o" if self.one_to_one else "o2m","n_gt":n_gt,"n_pos":n_pos,"score_sum":round(assigned_scores.sum().item(),4),"norm_align_mean":round(norm_align.mean().item(),4) if n_pos>0 else 0,"iou_mean":round(pos_iou.mean().item(),4) if n_pos>0 else 0}
-                if n_pos > 0:
-                    _sc = assigned_scores[fg_mask].sum(-1)
-                    _data["score_mean"] = round(_sc.mean().item(),4)
-                    _data["score_min"] = round(_sc.min().item(),4)
-                    _data["score_max"] = round(_sc.max().item(),4)
-                with open(_lp4, "a") as _f4:
-                    _f4.write(_json4.dumps({"sessionId":"387c01","hypothesisId":"H","location":"stal.py:assign","message":"label_assignment_postfix","data":_data,"timestamp":int(_time4.time()*1000)}) + "\n")
-            except: pass
-        # #endregion
 
         return assigned_labels, assigned_bboxes, assigned_scores, fg_mask

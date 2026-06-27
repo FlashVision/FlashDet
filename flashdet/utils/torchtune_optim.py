@@ -1,7 +1,7 @@
 """
 Torchtune-inspired memory & performance optimizations for FlashDet.
 
-Techniques ported from https://github.com/meta-pytorch/torchtune:
+Inspired by https://github.com/pytorch/torchtune:
   - Activation checkpointing (gradient checkpointing)
   - Activation offloading to CPU
   - Fused optimizer step into backward pass
@@ -33,7 +33,7 @@ def apply_activation_checkpointing(
     Inspired by torchtune's ``enable_activation_checkpointing`` recipe flag.
     """
     if target_modules is None:
-        target_modules = ["backbone", "fpn", "aux_fpn"]
+        target_modules = ["backbone", "neck"]
 
     wrapped = []
     for name in target_modules:

@@ -8,10 +8,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from flashdet.trackers.byte_tracker import ByteTracker
+from flashdet.trackers import FlashTracker
+from flashdet.solutions._base import BaseSolution
 
 
-class QueueManager:
+class QueueManager(BaseSolution):
     """Monitor queue regions and count people waiting in each zone.
 
     Define one or more queue regions as polygons.  The manager tracks how
@@ -21,14 +22,11 @@ class QueueManager:
     Parameters
     ----------
     predictor : object
-        FlashDet predictor returning Nx6 detections
-        ``[x1, y1, x2, y2, score, cls]``.
-    tracker : ByteTracker | None
-        Multi-object tracker.  Defaults to a fresh ``ByteTracker()``.
+        FlashDet predictor returning Nx6 detections.
+    tracker : FlashTracker | None
+        Multi-object tracker.
     queue_regions : list[np.ndarray] | None
         List of polygons, each an Nx2 int32 array of vertices.
-        If *None*, a single rectangular region covering the centre third
-        of the frame is used automatically on the first frame.
     classes : list[int] | None
         Only count objects whose class ID is in this list.
     fps : float
@@ -38,15 +36,14 @@ class QueueManager:
     def __init__(
         self,
         predictor,
-        tracker: Optional[ByteTracker] = None,
+        tracker: Optional[FlashTracker] = None,
         queue_regions: Optional[List[np.ndarray]] = None,
         classes: Optional[List[int]] = None,
         fps: float = 30.0,
     ):
-        self.predictor = predictor
-        self.tracker = tracker or ByteTracker()
-        self.queue_regions = queue_regions
-        self.classes = classes
+        super().__init__(predictor, tracker, classes)
+        self._ensure_tracker()
+        self.queue_regions = self._normalize_regions(queue_regions)
         self.fps = fps
 
         self._n_regions: int = 0
@@ -56,21 +53,15 @@ class QueueManager:
         self._wait_times: Dict[int, deque] = defaultdict(lambda: deque(maxlen=200))
         self._frame_idx: int = 0
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_regions(regions):
+        if regions is None:
+            return None
+        if isinstance(regions, dict):
+            return [np.asarray(p, dtype=np.int32) for p in regions.values()]
+        return [np.array(p, dtype=np.int32) if not isinstance(p, np.ndarray) else p.astype(np.int32) for p in regions]
 
     def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Process a single video frame.
-
-        Returns
-        -------
-        annotated : np.ndarray
-            Frame with queue regions, occupancy counts and bounding boxes.
-        results : dict
-            Per-region stats including ``queue_length``, ``avg_wait_time``,
-            ``peak_count``.
-        """
         if self.queue_regions is None:
             h, w = frame.shape[:2]
             self.queue_regions = [
@@ -83,7 +74,7 @@ class QueueManager:
         self._n_regions = len(self.queue_regions)
         self._frame_idx += 1
 
-        detections = self._run_detector(frame)
+        detections = self._detect(frame)
         tracks = self.tracker.update(detections)
 
         annotated = frame.copy()
@@ -92,7 +83,7 @@ class QueueManager:
         for trk in tracks:
             x1, y1, x2, y2, tid, score, cls = trk
             tid, cls = int(tid), int(cls)
-            if self.classes is not None and cls not in self.classes:
+            if not self._filter_class(cls):
                 continue
 
             cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
@@ -134,14 +125,6 @@ class QueueManager:
         return annotated, self.get_results()
 
     def get_results(self) -> Dict[str, Any]:
-        """Return per-region queue statistics.
-
-        Returns
-        -------
-        dict
-            ``{"regions": [{"queue_length": …, "avg_wait_time": …,
-            "peak_count": …}, …], "total_waiting": …}``
-        """
         regions: List[Dict[str, Any]] = []
         total = 0
         for ridx in range(self._n_regions):
@@ -157,22 +140,9 @@ class QueueManager:
         return {"regions": regions, "total_waiting": total}
 
     def reset(self):
-        """Reset all queue state."""
+        super().reset()
         self._track_enter_frame.clear()
         self._current_ids.clear()
         self._peak_counts.clear()
         self._wait_times.clear()
         self._frame_idx = 0
-        self.tracker.reset()
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _run_detector(self, frame: np.ndarray) -> np.ndarray:
-        result = self.predictor(frame)
-        if isinstance(result, np.ndarray):
-            return result
-        if hasattr(result, "detections"):
-            return np.asarray(result.detections, dtype=np.float64)
-        return np.empty((0, 6), dtype=np.float64)

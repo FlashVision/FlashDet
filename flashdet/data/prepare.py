@@ -2,12 +2,12 @@
 Dataset preparation utilities.
 
 Supports conversion from:
-  1. YOLO format   → COCO JSON  (convert_yolo_to_coco)
-  2. Pascal VOC    → COCO JSON  (convert_voc_to_coco)
+  1. TXT label format → COCO JSON  (convert_txt_to_coco)
+  2. Pascal VOC       → COCO JSON  (convert_voc_to_coco)
   3. Supervisely format → COCO JSON  (convert_supervisely_to_coco)
 
-Class names are always read from the source dataset (YOLO data.yaml /
-Supervisely meta.json) so no hardcoded PPE names pollute other datasets.
+Class names are always read from the source dataset (data.yaml /
+Supervisely meta.json).
 """
 
 import os
@@ -28,17 +28,17 @@ _FALLBACK_CLASS_NAMES = [
 ]
 
 
-def _read_yolo_class_names(yolo_dir: str) -> Optional[List[str]]:
+def _read_txt_class_names(label_dir: str) -> Optional[List[str]]:
     """
-    Try to read class names from a YOLO dataset directory.
+    Try to read class names from a TXT label dataset directory.
 
     Looks for (in order):
-      1. data.yaml   — standard Roboflow / YOLOv5 / YOLOv8 export
-      2. classes.txt — older YOLOv4 / darknet convention
+      1. data.yaml   — standard Roboflow export
+      2. classes.txt — older darknet convention
     """
     # 1. data.yaml
     for yaml_name in ["data.yaml", "dataset.yaml", "ppe_data.yaml"]:
-        yaml_path = os.path.join(yolo_dir, yaml_name)
+        yaml_path = os.path.join(label_dir, yaml_name)
         if os.path.isfile(yaml_path):
             try:
                 import yaml
@@ -53,9 +53,9 @@ def _read_yolo_class_names(yolo_dir: str) -> Optional[List[str]]:
                 pass
 
     # 2. classes.txt
-    txt_path = os.path.join(yolo_dir, "classes.txt")
+    txt_path = os.path.join(label_dir, "classes.txt")
     if not os.path.isfile(txt_path):
-        txt_path = os.path.join(yolo_dir, "train", "labels", "classes.txt")
+        txt_path = os.path.join(label_dir, "train", "labels", "classes.txt")
     if os.path.isfile(txt_path):
         with open(txt_path) as f:
             names = [line.strip() for line in f if line.strip()]
@@ -76,8 +76,8 @@ def _copy_or_link(src: str, dst: str) -> None:
         shutil.copy2(src, dst)
 
 
-def _flat_yolo_output_filename(img_path: str, yolo_root: str) -> str:
-    rel = os.path.relpath(img_path, yolo_root)
+def _flat_txt_output_filename(img_path: str, label_root: str) -> str:
+    rel = os.path.relpath(img_path, label_root)
     if rel.startswith(".."):
         return os.path.basename(img_path)
     safe = rel.replace(os.sep, "__")
@@ -98,7 +98,7 @@ def _find_any_coco_json(folder: str, max_depth: int = 6) -> Optional[str]:
     return None
 
 
-def _has_yolo_split_layout(folder: str) -> bool:
+def _has_txt_split_layout(folder: str) -> bool:
     for split in ("train", "valid", "val", "test"):
         img_d = os.path.join(folder, split, "images")
         lbl_d = os.path.join(folder, split, "labels")
@@ -107,7 +107,7 @@ def _has_yolo_split_layout(folder: str) -> bool:
     return False
 
 
-def _yolo_txt_beside_image(img_path: str, yolo_root: str) -> Optional[str]:
+def _txt_beside_image(img_path: str, label_root: str) -> Optional[str]:
     p = Path(img_path)
     stem = p.stem
     same = p.with_suffix(".txt")
@@ -116,13 +116,13 @@ def _yolo_txt_beside_image(img_path: str, yolo_root: str) -> Optional[str]:
     labels_peer = p.parent / "labels" / f"{stem}.txt"
     if labels_peer.is_file():
         return str(labels_peer)
-    root_lbl = Path(yolo_root) / "labels" / f"{stem}.txt"
+    root_lbl = Path(label_root) / "labels" / f"{stem}.txt"
     if root_lbl.is_file():
         return str(root_lbl)
     return None
 
 
-def _line_looks_yolo(parts: List[str]) -> bool:
+def _line_looks_txt_label(parts: List[str]) -> bool:
     if len(parts) < 5:
         return False
     try:
@@ -134,7 +134,7 @@ def _line_looks_yolo(parts: List[str]) -> bool:
     return True
 
 
-def _has_yolo_flat_txt(folder: str) -> bool:
+def _has_flat_txt_labels(folder: str) -> bool:
     """True when label .txt files sit next to images (or images/ + labels/)."""
     if os.path.isdir(os.path.join(folder, "images")) and os.path.isdir(
         os.path.join(folder, "labels")
@@ -144,7 +144,7 @@ def _has_yolo_flat_txt(folder: str) -> bool:
             try:
                 with open(lf) as f:
                     line = f.readline().strip()
-                if line and _line_looks_yolo(line.split()):
+                if line and _line_looks_txt_label(line.split()):
                     return True
             except OSError:
                 continue
@@ -158,7 +158,7 @@ def _has_yolo_flat_txt(folder: str) -> bool:
                 continue
             n_img += 1
             ip = os.path.join(root, f)
-            if _yolo_txt_beside_image(ip, folder):
+            if _txt_beside_image(ip, folder):
                 n_txt_side += 1
             if n_img >= 300:
                 break
@@ -188,15 +188,15 @@ def detect_dataset_format(folder: str) -> str:
     """
     Heuristic format label for a dataset root.
 
-    Returns one of: ``coco``, ``yolo``, ``voc``, ``unknown``.
-    Priority: COCO JSON → YOLO → Pascal VOC.
+    Returns one of: ``coco``, ``txt``, ``voc``, ``unknown``.
+    Priority: COCO JSON → TXT labels → Pascal VOC.
     """
     if not os.path.isdir(folder):
         return "unknown"
     if _find_any_coco_json(folder) is not None:
         return "coco"
-    if _has_yolo_split_layout(folder) or _has_yolo_flat_txt(folder):
-        return "yolo"
+    if _has_txt_split_layout(folder) or _has_flat_txt_labels(folder):
+        return "txt"
     if _voc_ann_dir(folder) is not None:
         return "voc"
     return "unknown"
@@ -405,14 +405,14 @@ def convert_voc_to_coco(
     return stats
 
 
-def _convert_yolo_flat_to_coco(
-    yolo_dir: str,
+def _convert_txt_flat_to_coco(
+    label_dir: str,
     coco_dir: str,
     class_names: List[str],
     val_ratio: float = 0.15,
     seed: int = 42,
 ) -> Dict:
-    """YOLO without train/*/images layout: images anywhere + sibling ``labels/`` or co-located .txt."""
+    """Flat TXT label layout: images anywhere + sibling ``labels/`` or co-located .txt."""
     random.seed(seed)
     categories = [
         {"id": i, "name": name, "supercategory": "object"}
@@ -423,7 +423,7 @@ def _convert_yolo_flat_to_coco(
     pairs: List[Tuple[str, Optional[str]]] = []
     abs_coco = os.path.abspath(coco_dir)
 
-    for root, dirs, files in os.walk(yolo_dir):
+    for root, dirs, files in os.walk(label_dir):
         dirs[:] = [
             d
             for d in dirs
@@ -435,17 +435,17 @@ def _convert_yolo_flat_to_coco(
             if ext not in _IMG_EXT:
                 continue
             ip = os.path.normpath(os.path.join(root, f))
-            rel = os.path.relpath(ip, yolo_dir)
+            rel = os.path.relpath(ip, label_dir)
             if rel in seen_rel:
                 continue
             seen_rel.add(rel)
-            lbl = _yolo_txt_beside_image(ip, yolo_dir)
+            lbl = _txt_beside_image(ip, label_dir)
             pairs.append((ip, lbl))
 
     pairs.sort(key=lambda x: x[0])
     if not pairs:
         raise ValueError(
-            "No images found for flat YOLO conversion. "
+            "No images found for flat TXT label conversion. "
             "Expected images with .txt labels beside them or under labels/."
         )
 
@@ -468,8 +468,8 @@ def _convert_yolo_flat_to_coco(
         ann_id = 1
         img_id = 0
 
-        for img_path, lbl_path in tqdm(sp, desc=f"yolo-flat-{split_name}"):
-            fname = _flat_yolo_output_filename(img_path, yolo_dir)
+        for img_path, lbl_path in tqdm(sp, desc=f"txt-flat-{split_name}"):
+            fname = _flat_txt_output_filename(img_path, label_dir)
             dst = os.path.join(out_dir, fname)
             _copy_or_link(img_path, dst)
 
@@ -489,7 +489,7 @@ def _convert_yolo_flat_to_coco(
                 with open(lbl_path) as f:
                     for line in f:
                         parts = line.strip().split()
-                        if not _line_looks_yolo(parts):
+                        if not _line_looks_txt_label(parts):
                             continue
                         class_id = int(parts[0])
                         cx, cy, w, h = map(float, parts[1:5])
@@ -526,26 +526,30 @@ def _convert_yolo_flat_to_coco(
             "images": len(coco["images"]),
             "annotations": len(coco["annotations"]),
         }
-        print(f"[YOLO flat→COCO] Saved {ann_path}")
+        print(f"[TXT→COCO] Saved {ann_path}")
 
     return stats
 
 
-def convert_yolo_to_coco(
-    yolo_dir: str,
+def convert_txt_to_coco(
+    label_dir: str,
     coco_dir: str,
     class_names: List[str] = None,
 ) -> Dict:
     """
-    Convert a YOLO-format dataset to COCO JSON format.
+    Convert a TXT-label-format dataset to COCO JSON format.
+
+    Expects images under ``train/images/``, ``valid/images/``, etc. with
+    corresponding ``train/labels/``, ``valid/labels/`` directories containing
+    one ``.txt`` file per image (``class_id cx cy w h`` normalised format).
 
     Class names are resolved in this priority order:
       1. Explicit ``class_names`` argument (caller-supplied)
-      2. ``data.yaml`` / ``classes.txt`` found inside ``yolo_dir``
-      3. Hard-coded fallback (PPE names — legacy behaviour)
+      2. ``data.yaml`` / ``classes.txt`` found inside ``label_dir``
+      3. Hard-coded fallback (generic names — legacy behaviour)
 
     Args:
-        yolo_dir: Root directory of the YOLO dataset.
+        label_dir: Root directory of the TXT label dataset.
         coco_dir: Output directory for the COCO-format dataset.
         class_names: Optional explicit list of class names.
 
@@ -553,11 +557,11 @@ def convert_yolo_to_coco(
         Statistics dictionary {split: {"images": N, "annotations": M}}.
     """
     if class_names is None:
-        class_names = _read_yolo_class_names(yolo_dir)
+        class_names = _read_txt_class_names(label_dir)
         if class_names is None:
             print(
                 "[WARN] Could not read class names from data.yaml or classes.txt. "
-                "Falling back to hardcoded PPE names — VERIFY this is correct!"
+                "Falling back to generic class names — verify this is correct!"
             )
             class_names = _FALLBACK_CLASS_NAMES
 
@@ -572,8 +576,8 @@ def convert_yolo_to_coco(
     stats = {}
 
     for split in ["train", "valid", "test"]:
-        images_dir = os.path.join(yolo_dir, split, "images")
-        labels_dir = os.path.join(yolo_dir, split, "labels")
+        images_dir = os.path.join(label_dir, split, "images")
+        labels_dir = os.path.join(label_dir, split, "labels")
         
         if not os.path.exists(images_dir):
             print(f"Skipping {split}: {images_dir} not found")
@@ -623,7 +627,7 @@ def convert_yolo_to_coco(
                     import shutil
                     shutil.copy2(img_path, link_path)
             
-            # Parse YOLO labels
+            # Parse TXT labels
             label_path = os.path.join(labels_dir, img_path.stem + ".txt")
             if os.path.exists(label_path):
                 with open(label_path) as f:
@@ -671,8 +675,8 @@ def convert_yolo_to_coco(
     if stats:
         return stats
 
-    print("No train/*/images layout — attempting flat YOLO conversion.")
-    return _convert_yolo_flat_to_coco(yolo_dir, coco_dir, class_names)
+    print("No train/*/images layout — attempting flat TXT label conversion.")
+    return _convert_txt_flat_to_coco(label_dir, coco_dir, class_names)
 
 
 def convert_supervisely_to_coco(
@@ -830,6 +834,309 @@ def convert_supervisely_to_coco(
         print(f"  Saved: {ann_path}")
 
     return stats
+
+
+def convert_coco_to_txt(
+    coco_dir: str,
+    output_dir: str,
+) -> Dict:
+    """
+    Convert COCO JSON format to YOLO TXT label format.
+
+    Produces the standard YOLO layout::
+
+        output_dir/
+            train/
+                images/
+                labels/
+            valid/
+                images/
+                labels/
+            data.yaml
+
+    Args:
+        coco_dir: COCO dataset directory (with train/, valid/, etc.).
+        output_dir: Output directory for the YOLO-format dataset.
+
+    Returns:
+        Statistics dictionary {split: {"images": N, "labels": M}}.
+    """
+    stats: Dict = {}
+    all_class_names: List[str] = []
+
+    for split in ["train", "valid", "val", "test"]:
+        ann_path = os.path.join(coco_dir, split, "_annotations.coco.json")
+        if not os.path.isfile(ann_path):
+            continue
+
+        with open(ann_path) as f:
+            data = json.load(f)
+
+        categories = data.get("categories", [])
+        if categories and not all_class_names:
+            max_id = max(c["id"] for c in categories)
+            all_class_names = [""] * (max_id + 1)
+            for c in categories:
+                all_class_names[c["id"]] = c.get("name", f"class_{c['id']}")
+
+        img_lookup = {img["id"]: img for img in data.get("images", [])}
+        anns_by_image: Dict[int, List] = {}
+        for ann in data.get("annotations", []):
+            anns_by_image.setdefault(ann["image_id"], []).append(ann)
+
+        canonical_split = "valid" if split == "val" else split
+        img_out = os.path.join(output_dir, canonical_split, "images")
+        lbl_out = os.path.join(output_dir, canonical_split, "labels")
+        os.makedirs(img_out, exist_ok=True)
+        os.makedirs(lbl_out, exist_ok=True)
+
+        n_labels = 0
+        src_img_dir = os.path.join(coco_dir, split)
+
+        for img_info in data.get("images", []):
+            img_id = img_info["id"]
+            fname = img_info["file_name"]
+            w = img_info["width"]
+            h = img_info["height"]
+
+            src_img = os.path.join(src_img_dir, fname)
+            dst_img = os.path.join(img_out, fname)
+            if os.path.isfile(src_img) and not os.path.exists(dst_img):
+                _copy_or_link(src_img, dst_img)
+
+            stem = Path(fname).stem
+            label_path = os.path.join(lbl_out, stem + ".txt")
+            lines = []
+            for ann in anns_by_image.get(img_id, []):
+                bbox = ann["bbox"]  # COCO: [x, y, w_box, h_box]
+                bx, by, bw, bh = bbox[0], bbox[1], bbox[2], bbox[3]
+                cx = (bx + bw / 2) / w
+                cy = (by + bh / 2) / h
+                nw = bw / w
+                nh = bh / h
+                cx = max(0.0, min(1.0, cx))
+                cy = max(0.0, min(1.0, cy))
+                nw = max(0.0, min(1.0, nw))
+                nh = max(0.0, min(1.0, nh))
+                cls_id = ann["category_id"]
+                lines.append(f"{cls_id} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
+
+            with open(label_path, "w") as f:
+                f.write("\n".join(lines))
+            if lines:
+                n_labels += 1
+
+        stats[canonical_split] = {
+            "images": len(data.get("images", [])),
+            "labels": n_labels,
+        }
+        print(f"[COCO→TXT] {canonical_split}: {stats[canonical_split]['images']} images, {n_labels} labels")
+
+    # Write data.yaml
+    yaml_path = os.path.join(output_dir, "data.yaml")
+    clean_names = [n for n in all_class_names if n]
+    with open(yaml_path, "w") as f:
+        f.write(f"train: {os.path.join(output_dir, 'train', 'images')}\n")
+        f.write(f"val: {os.path.join(output_dir, 'valid', 'images')}\n")
+        f.write(f"nc: {len(clean_names)}\n")
+        f.write(f"names: {clean_names}\n")
+    print(f"[COCO→TXT] Saved {yaml_path}")
+
+    return stats
+
+
+def convert_coco_to_voc(
+    coco_dir: str,
+    output_dir: str,
+) -> Dict:
+    """
+    Convert COCO JSON format to Pascal VOC XML format.
+
+    Produces::
+
+        output_dir/
+            JPEGImages/
+            Annotations/
+            ImageSets/Main/ (train.txt, val.txt)
+
+    Args:
+        coco_dir: COCO dataset directory.
+        output_dir: Output directory for the VOC-format dataset.
+
+    Returns:
+        Statistics dictionary {split: {"images": N, "annotations": M}}.
+    """
+    img_out = os.path.join(output_dir, "JPEGImages")
+    ann_out = os.path.join(output_dir, "Annotations")
+    sets_out = os.path.join(output_dir, "ImageSets", "Main")
+    os.makedirs(img_out, exist_ok=True)
+    os.makedirs(ann_out, exist_ok=True)
+    os.makedirs(sets_out, exist_ok=True)
+
+    cat_lookup: Dict[int, str] = {}
+    stats: Dict = {}
+
+    for split in ["train", "valid", "val", "test"]:
+        ann_path = os.path.join(coco_dir, split, "_annotations.coco.json")
+        if not os.path.isfile(ann_path):
+            continue
+
+        with open(ann_path) as f:
+            data = json.load(f)
+
+        for c in data.get("categories", []):
+            cat_lookup[c["id"]] = c.get("name", f"class_{c['id']}")
+
+        img_lookup = {img["id"]: img for img in data.get("images", [])}
+        anns_by_image: Dict[int, List] = {}
+        for ann in data.get("annotations", []):
+            anns_by_image.setdefault(ann["image_id"], []).append(ann)
+
+        canonical = "val" if split == "valid" else split
+        set_file = os.path.join(sets_out, f"{canonical}.txt")
+        stems: List[str] = []
+        src_img_dir = os.path.join(coco_dir, split)
+
+        for img_info in data.get("images", []):
+            img_id = img_info["id"]
+            fname = img_info["file_name"]
+            w = img_info["width"]
+            h = img_info["height"]
+            stem = Path(fname).stem
+            stems.append(stem)
+
+            src_img = os.path.join(src_img_dir, fname)
+            dst_img = os.path.join(img_out, fname)
+            if os.path.isfile(src_img) and not os.path.exists(dst_img):
+                _copy_or_link(src_img, dst_img)
+
+            root_el = ET.Element("annotation")
+            ET.SubElement(root_el, "folder").text = "JPEGImages"
+            ET.SubElement(root_el, "filename").text = fname
+            size_el = ET.SubElement(root_el, "size")
+            ET.SubElement(size_el, "width").text = str(w)
+            ET.SubElement(size_el, "height").text = str(h)
+            ET.SubElement(size_el, "depth").text = "3"
+
+            for ann in anns_by_image.get(img_id, []):
+                bbox = ann["bbox"]
+                x1 = int(round(bbox[0]))
+                y1 = int(round(bbox[1]))
+                x2 = int(round(bbox[0] + bbox[2]))
+                y2 = int(round(bbox[1] + bbox[3]))
+                cls_name = cat_lookup.get(ann["category_id"], "object")
+
+                obj_el = ET.SubElement(root_el, "object")
+                ET.SubElement(obj_el, "name").text = cls_name
+                ET.SubElement(obj_el, "pose").text = "Unspecified"
+                ET.SubElement(obj_el, "truncated").text = "0"
+                ET.SubElement(obj_el, "difficult").text = "0"
+                bnd = ET.SubElement(obj_el, "bndbox")
+                ET.SubElement(bnd, "xmin").text = str(max(0, x1))
+                ET.SubElement(bnd, "ymin").text = str(max(0, y1))
+                ET.SubElement(bnd, "xmax").text = str(min(w, x2))
+                ET.SubElement(bnd, "ymax").text = str(min(h, y2))
+
+            tree = ET.ElementTree(root_el)
+            xml_path = os.path.join(ann_out, stem + ".xml")
+            tree.write(xml_path, encoding="unicode", xml_declaration=True)
+
+        with open(set_file, "w") as f:
+            f.write("\n".join(stems))
+
+        stats[canonical] = {
+            "images": len(stems),
+            "annotations": sum(len(anns_by_image.get(img["id"], [])) for img in data.get("images", [])),
+        }
+        print(f"[COCO→VOC] {canonical}: {stats[canonical]['images']} images")
+
+    return stats
+
+
+def convert_dataset(
+    source_dir: str,
+    output_dir: Optional[str] = None,
+    target_format: str = "coco",
+    val_ratio: float = 0.15,
+    class_names: Optional[List[str]] = None,
+    seed: int = 42,
+) -> Dict:
+    """
+    Universal dataset format converter with auto-detection.
+
+    Detects the source format automatically and converts to the target format.
+    If the data is already in the target format, does nothing (no-op).
+
+    Supported formats: ``coco``, ``txt`` (YOLO), ``voc`` (Pascal VOC).
+
+    Args:
+        source_dir: Path to the source dataset root.
+        output_dir: Output directory. Defaults to ``source_dir + '_<target>'``.
+        target_format: Target format — one of ``"coco"``, ``"txt"``, ``"voc"``.
+        val_ratio: Train/val split ratio (for converters that create splits).
+        class_names: Optional explicit class names.
+        seed: Random seed for reproducible splits.
+
+    Returns:
+        Statistics dictionary or ``{"status": "already_in_target_format"}``.
+    """
+    target_format = target_format.lower().strip()
+    valid_formats = ("coco", "txt", "yolo", "voc")
+    if target_format not in valid_formats:
+        raise ValueError(f"target_format must be one of {valid_formats}, got '{target_format}'")
+    if target_format == "yolo":
+        target_format = "txt"
+
+    source_format = detect_dataset_format(source_dir)
+    print(f"[convert_dataset] Detected source format: '{source_format}'")
+    print(f"[convert_dataset] Target format: '{target_format}'")
+
+    if source_format == target_format:
+        print(f"[convert_dataset] Data is already in '{target_format}' format. Nothing to do.")
+        return {"status": "already_in_target_format", "format": target_format}
+
+    if source_format == "unknown":
+        raise ValueError(
+            f"Could not detect dataset format in '{source_dir}'. "
+            "Supported: COCO JSON, YOLO TXT labels, Pascal VOC XML."
+        )
+
+    if output_dir is None:
+        output_dir = source_dir.rstrip("/\\") + f"_{target_format}"
+
+    print(f"[convert_dataset] Converting: {source_format} → {target_format}")
+    print(f"[convert_dataset] Output: {output_dir}")
+
+    # Route to the appropriate converter
+    if target_format == "coco":
+        if source_format == "txt":
+            return convert_txt_to_coco(source_dir, output_dir, class_names=class_names)
+        elif source_format == "voc":
+            return convert_voc_to_coco(source_dir, output_dir, val_ratio=val_ratio, seed=seed)
+    elif target_format == "txt":
+        if source_format == "coco":
+            return convert_coco_to_txt(source_dir, output_dir)
+        elif source_format == "voc":
+            # VOC → COCO → TXT (two-stage)
+            intermediate = output_dir + "_coco_tmp"
+            convert_voc_to_coco(source_dir, intermediate, val_ratio=val_ratio, seed=seed)
+            result = convert_coco_to_txt(intermediate, output_dir)
+            import shutil
+            shutil.rmtree(intermediate, ignore_errors=True)
+            return result
+    elif target_format == "voc":
+        if source_format == "coco":
+            return convert_coco_to_voc(source_dir, output_dir)
+        elif source_format == "txt":
+            # TXT → COCO → VOC (two-stage)
+            intermediate = output_dir + "_coco_tmp"
+            convert_txt_to_coco(source_dir, intermediate, class_names=class_names)
+            result = convert_coco_to_voc(intermediate, output_dir)
+            import shutil
+            shutil.rmtree(intermediate, ignore_errors=True)
+            return result
+
+    raise ValueError(f"Conversion from '{source_format}' to '{target_format}' is not supported.")
 
 
 def verify_dataset(coco_dir: str) -> bool:

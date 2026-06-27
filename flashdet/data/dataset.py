@@ -208,7 +208,6 @@ class FlashDetDataset(Dataset):
         return image, boxes
 
 
-PPEDataset = FlashDetDataset
 
 
 def collate_fn(batch: List[Dict]) -> Tuple[torch.Tensor, Dict]:

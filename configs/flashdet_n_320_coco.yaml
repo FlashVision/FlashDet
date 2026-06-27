@@ -1,0 +1,27 @@
+# FlashDet-N training config (COCO, 320px)
+model:
+  architecture: flashdet
+  size: "n"
+  num_classes: 80
+  input_size: [320, 320]
+
+data:
+  train_images: "data/coco/train2017"
+  train_annotations: "data/coco/annotations/instances_train2017.json"
+  val_images: "data/coco/val2017"
+  val_annotations: "data/coco/annotations/instances_val2017.json"
+  num_workers: 4
+
+train:
+  epochs: 300
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.05
+  warmup_epochs: 5
+  val_interval: 5
+  save_dir: "workspace/flashdet_n_coco"
+  amp: true
+
+augment:
+  scale: [0.6, 1.4]
+  flip_prob: 0.5

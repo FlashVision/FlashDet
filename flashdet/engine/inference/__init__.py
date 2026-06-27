@@ -1,6 +1,8 @@
-"""Inference and post-processing engines."""
+from .postprocess import decode_yolo_predictions, decode_detr_predictions
+from .predictor import Predictor
 
-from flashdet.engine.inference.predictor import Predictor
-from flashdet.engine.inference.postprocess import decode_yolo_predictions, decode_detr_predictions
-
-__all__ = ["Predictor", "decode_yolo_predictions", "decode_detr_predictions"]
+__all__ = [
+    "decode_yolo_predictions",
+    "decode_detr_predictions",
+    "Predictor",
+]

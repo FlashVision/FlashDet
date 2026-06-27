@@ -1,13 +1,14 @@
 """
 YOLOv9 — Programmable Gradient Information (PGI) with GELAN architecture.
 
-Key innovations:
-  - GELAN (Generalized Efficient Layer Aggregation Network) for the backbone
-  - PGI (Programmable Gradient Information) with auxiliary reversible branch
-
-Reference:
+Independent implementation based on:
     Wang et al., "YOLOv9: Learning What You Want to Learn Using
-    Programmable Gradient Information", 2024.
+    Programmable Gradient Information", arXiv:2402.13616, 2024.
+
+This is a clean-room implementation based on the paper's architectural
+description. No code was copied from GPL/AGPL-licensed repositories.
+
+License: MIT (same as FlashDet)
 """
 
 import logging

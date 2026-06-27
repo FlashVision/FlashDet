@@ -65,26 +65,20 @@ class Validator:
     def _load_model(self, model_path: str, cfg):
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
 
-        backbone_size = cfg.model.backbone_size
         num_classes = cfg.model.num_classes
-        fpn_channels = cfg.model.fpn_out_channels
         class_names = list(cfg.class_names)
+        size = getattr(cfg.model, "size", "n")
 
         if "config" in checkpoint:
             ckpt_cfg = checkpoint["config"]
-            backbone_size = ckpt_cfg.get("backbone_size", backbone_size)
             num_classes = ckpt_cfg.get("num_classes", num_classes)
-            fpn_channels = ckpt_cfg.get("fpn_channels", fpn_channels)
+            size = ckpt_cfg.get("model_size", ckpt_cfg.get("size", size))
             if "class_names" in ckpt_cfg and ckpt_cfg["class_names"]:
                 class_names = ckpt_cfg["class_names"]
 
         model = FlashDet(
             num_classes=num_classes,
-            input_size=self.input_size,
-            backbone_size=backbone_size,
-            fpn_channels=fpn_channels,
-            pretrained=False,
-            use_aux_head=False,
+            size=size,
         )
 
         if "model_state_dict" in checkpoint:

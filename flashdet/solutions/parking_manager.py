@@ -9,10 +9,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import cv2
 import numpy as np
 
-from flashdet.trackers.byte_tracker import ByteTracker
+from flashdet.trackers import FlashTracker
+from flashdet.solutions._base import BaseSolution
 
 
-class ParkingManager:
+class ParkingManager(BaseSolution):
     """Define parking spots as polygons and track their occupancy.
 
     Each parking spot is defined by a polygon (Nx2 array of vertices).
@@ -23,11 +24,10 @@ class ParkingManager:
     ----------
     predictor : object
         FlashDet predictor returning Nx6 detections.
-    tracker : ByteTracker | None
+    tracker : FlashTracker | None
         Multi-object tracker.
     parking_spots : list[np.ndarray] | None
-        List of polygons, each an Nx2 int32 array.  Can also be loaded
-        from a JSON file via :meth:`load_spots`.
+        List of polygons, each an Nx2 int32 array.
     occupancy_threshold : float
         Minimum IoU overlap between detection bbox and spot polygon for
         the spot to be considered occupied.  When set to 0 (default),
@@ -39,23 +39,18 @@ class ParkingManager:
     def __init__(
         self,
         predictor,
-        tracker: Optional[ByteTracker] = None,
+        tracker: Optional[FlashTracker] = None,
         parking_spots: Optional[List[np.ndarray]] = None,
         occupancy_threshold: float = 0.0,
         classes: Optional[List[int]] = None,
     ):
-        self.predictor = predictor
-        self.tracker = tracker or ByteTracker()
+        super().__init__(predictor, tracker, classes)
+        self._ensure_tracker()
         self.parking_spots: List[np.ndarray] = parking_spots or []
         self.occupancy_threshold = occupancy_threshold
-        self.classes = classes
 
         self._spot_status: Dict[int, bool] = {}
         self._spot_track_ids: Dict[int, Optional[int]] = {}
-
-    # ------------------------------------------------------------------
-    # Spot management
-    # ------------------------------------------------------------------
 
     def add_spot(self, polygon: np.ndarray, spot_id: Optional[int] = None) -> int:
         """Add a parking spot polygon and return its index."""
@@ -69,17 +64,7 @@ class ParkingManager:
         return idx
 
     def load_spots(self, path: Union[str, Path]):
-        """Load parking spot definitions from a JSON file.
-
-        Expected format::
-
-            {
-                "spots": [
-                    {"id": 0, "polygon": [[x1,y1], [x2,y2], …]},
-                    …
-                ]
-            }
-        """
+        """Load parking spot definitions from a JSON file."""
         data = json.loads(Path(path).read_text())
         self.parking_spots.clear()
         for entry in data["spots"]:
@@ -93,33 +78,17 @@ class ParkingManager:
             spots.append({"id": idx, "polygon": poly.tolist()})
         Path(path).write_text(json.dumps({"spots": spots}, indent=2))
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Process one frame and update spot occupancy.
-
-        Returns
-        -------
-        annotated : np.ndarray
-            Frame with coloured spot polygons (green=free, red=occupied).
-        results : dict
-            ``{"total_spots": …, "occupied": …, "available": …,
-            "occupancy_rate": …, "spots": [{…}, …]}``
-        """
-        detections = self._run_detector(frame)
+        detections = self._detect(frame)
         tracks = self.tracker.update(detections)
 
         annotated = frame.copy()
 
         filtered_tracks = []
         for trk in tracks:
-            x1, y1, x2, y2, tid, score, cls = trk
-            cls = int(cls)
-            if self.classes is not None and cls not in self.classes:
-                continue
-            filtered_tracks.append(trk)
+            cls = int(trk[6])
+            if self._filter_class(cls):
+                filtered_tracks.append(trk)
 
         self._update_occupancy(filtered_tracks)
 
@@ -139,7 +108,7 @@ class ParkingManager:
             )
 
         for trk in filtered_tracks:
-            x1, y1, x2, y2, tid, score, cls = trk
+            x1, y1, x2, y2 = trk[:4]
             cv2.rectangle(annotated, (int(x1), int(y1)), (int(x2), int(y2)), (255, 200, 0), 1)
 
         total = len(self.parking_spots)
@@ -153,7 +122,6 @@ class ParkingManager:
         return annotated, self.get_results()
 
     def get_results(self) -> Dict[str, Any]:
-        """Return parking occupancy summary."""
         total = len(self.parking_spots)
         occupied = sum(1 for v in self._spot_status.values() if v)
         available = total - occupied
@@ -174,23 +142,16 @@ class ParkingManager:
         }
 
     def reset(self):
-        """Reset occupancy state."""
+        super().reset()
         self._spot_status.clear()
         self._spot_track_ids.clear()
-        self.tracker.reset()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _update_occupancy(self, tracks: List[np.ndarray]):
-        """Determine which spots are occupied given current tracks."""
+    def _update_occupancy(self, tracks: list):
         self._spot_status = {i: False for i in range(len(self.parking_spots))}
         self._spot_track_ids = {i: None for i in range(len(self.parking_spots))}
 
         for trk in tracks:
-            x1, y1, x2, y2, tid, score, cls = trk
-            tid = int(tid)
+            x1, y1, x2, y2, tid = trk[0], trk[1], trk[2], trk[3], int(trk[4])
             cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
             if self.occupancy_threshold > 0:
@@ -208,10 +169,6 @@ class ParkingManager:
 
     @staticmethod
     def _bbox_polygon_iou(bbox: np.ndarray, polygon: np.ndarray) -> float:
-        """Approximate IoU between an axis-aligned bbox and a polygon.
-
-        Uses rasterised masks for an exact intersection area.
-        """
         x1, y1, x2, y2 = bbox[:4].astype(int)
         poly_pts = polygon.astype(int)
 
@@ -231,11 +188,3 @@ class ParkingManager:
         inter = int((mask_bbox & mask_poly).sum())
         union = int((mask_bbox | mask_poly).sum())
         return inter / union if union > 0 else 0.0
-
-    def _run_detector(self, frame: np.ndarray) -> np.ndarray:
-        result = self.predictor(frame)
-        if isinstance(result, np.ndarray):
-            return result
-        if hasattr(result, "detections"):
-            return np.asarray(result.detections, dtype=np.float64)
-        return np.empty((0, 6), dtype=np.float64)

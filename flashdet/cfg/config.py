@@ -30,37 +30,40 @@ class DataConfig:
 class ModelConfig:
     """Model architecture configuration.
 
-    Supported architectures: flashdet, detr, rt-detr, yolov9, yolov10, yolov11, grounding-dino.
-
-    Official FlashDet model specifications:
-    - FlashDet-m:      backbone=1.0x, fpn=96,  ~1.17M params, 2.3MB FP16
-    - FlashDet-m-1.5x: backbone=1.5x, fpn=128, ~2.44M params, 4.7MB FP16
-    - FlashDet-m-0.5x: backbone=0.5x, fpn=96,  ~0.49M params, ~0.9MB FP16 (ultra-lite)
+    Supported architectures: flashdet, yolov9, yolov10, yolov11.
     """
     name: str = "FlashDet"
     architecture: str = "flashdet"
     num_classes: int = 80
     input_size: Tuple[int, int] = (320, 320)
+    size: str = "n"
     
-    # Backbone: 1.0x for FlashDet-m, 1.5x for m-1.5x, 0.5x for m-0.5x
-    backbone: str = "ShuffleNetV2"
-    backbone_size: str = "1.0x"  # Default matches official FlashDet-m
+    # FlashDet backbone settings
+    backbone: str = "LiteBackbone"
+    backbone_size: str = "1.0x"
     backbone_pretrained: bool = True
     
-    # FPN (96 for m, 128 for m-1.5x)
+    # FlashDet FPN
     fpn_in_channels: List[int] = field(default_factory=lambda: [116, 232, 464])
     fpn_out_channels: int = 96
     
-    # Head
+    # FlashDet head
     head_channels: int = 96
     stacked_convs: int = 2
     strides: List[int] = field(default_factory=lambda: [8, 16, 32, 64])
     reg_max: int = 7
     
-    # Loss weights
+    # FlashDet loss weights
     loss_qfl_weight: float = 1.0
     loss_dfl_weight: float = 0.25
     loss_bbox_weight: float = 2.0
+
+    # YOLO-family settings
+    width_mult: float = 1.0
+    depth_mult: float = 1.0
+    use_pgi: bool = True
+    use_psa: bool = True
+    use_c2psa: bool = True
 
 
 @dataclass
@@ -144,14 +147,14 @@ class Config:
 
 
 MODEL_SIZE_MAP = {
-    # Legacy NanoDet-era sizes (backward compat)
+    # Legacy size specifications (backward compat)
     "m-0.5x": ("0.5x", [58, 116, 232], 96),
     "m": ("1.0x", [116, 232, 464], 96),
     "m-1.5x": ("1.5x", [176, 352, 704], 128),
 }
 
-# YOLO26-based FlashDet sizes
-YOLO26_SIZE_MAP = {
+FLASHDET_SIZE_MAP = {
+    "p": "p",
     "n": "n",
     "s": "s",
     "m": "m",
@@ -169,17 +172,16 @@ def get_config(
     """Return configuration for a given model size.
 
     Args:
-        model_size: YOLO26-based: "n", "s", "m", "l", "x".
-            Legacy NanoDet: "m-0.5x", "m-1.5x" (backward compat).
+        model_size: "p", "n", "s", "m", "l", "x".
+            Legacy: "m-0.5x", "m-1.5x" (backward compat).
         input_size: Input image dimension (square).
         num_classes: Number of detection classes.
         **overrides: Additional overrides applied to the Config.
     """
     cfg = Config()
 
-    # YOLO26-based FlashDet size
-    if model_size in YOLO26_SIZE_MAP:
-        cfg.model.size = YOLO26_SIZE_MAP[model_size]
+    if model_size in FLASHDET_SIZE_MAP:
+        cfg.model.size = FLASHDET_SIZE_MAP[model_size]
     elif model_size in MODEL_SIZE_MAP:
         backbone_size, fpn_in, fpn_out = MODEL_SIZE_MAP[model_size]
         cfg.model.backbone_size = backbone_size

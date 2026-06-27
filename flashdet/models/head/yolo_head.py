@@ -1,9 +1,14 @@
-"""Shared decoupled detection heads for YOLO-family models."""
+"""Shared decoupled detection heads for YOLO-family models.
+
+Independent implementation based on:
+    Wang et al., "YOLOv7: Trainable bag-of-freebies sets new
+    state-of-the-art for real-time object detectors", CVPR 2023.
+"""
 
 import torch
 import torch.nn as nn
 
-from flashdet.models.layers import ConvBNSiLU
+from flashdet.models.layers.yolo_blocks import ConvBNSiLU
 
 
 class YOLODetectionHead(nn.Module):

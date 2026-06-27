@@ -5,7 +5,7 @@ These augmentations operate on multiple images and their annotations
 simultaneously, producing richly augmented training samples.
 
 References:
-  - Mosaic: Bochkovskiy et al., "YOLOv4", 2020.
+  - Mosaic augmentation (multi-image composition).
   - MixUp: Zhang et al., "mixup: Beyond Empirical Risk Minimization", ICLR 2018.
   - Copy-Paste: Ghiasi et al., "Simple Copy-Paste is a Strong Data
     Augmentation Method for Instance Segmentation", CVPR 2021.

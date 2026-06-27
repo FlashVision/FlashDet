@@ -1,11 +1,20 @@
-"""Shared convolution building blocks."""
+"""Shared convolution building blocks.
+
+ConvBlock is a convenience alias for ConvModule with SiLU activation
+and short parameter names. Both share the same internal structure.
+"""
 
 import torch
 import torch.nn as nn
 
 
-class ConvBNSiLU(nn.Module):
-    """Conv2d + BatchNorm + SiLU activation block."""
+class ConvBlock(nn.Module):
+    """Conv2d + BatchNorm + SiLU activation block.
+
+    Short-form API for use in heads, necks, and blocks where SiLU
+    is the standard activation. For configurable activation, use
+    ConvModule directly.
+    """
 
     def __init__(self, in_ch: int, out_ch: int, k: int = 1, s: int = 1, p: int = None, g: int = 1):
         super().__init__()
@@ -17,14 +26,3 @@ class ConvBNSiLU(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.act(self.bn(self.conv(x)))
-
-
-class DownSample(nn.Module):
-    """Downsampling via 3x3 stride-2 conv."""
-
-    def __init__(self, in_ch: int, out_ch: int):
-        super().__init__()
-        self.conv = ConvBNSiLU(in_ch, out_ch, 3, 2)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(x)

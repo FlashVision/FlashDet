@@ -7,12 +7,12 @@ without modifying source code.
 Usage:
     from flashdet.registry import BACKBONES, NECKS, HEADS
 
-    @BACKBONES.register("MobileNetV3")
-    class MobileNetV3(nn.Module):
+    @BACKBONES.register("MyBackbone")
+    class MyBackbone(nn.Module):
         ...
 
     # Later, build from config
-    backbone = BACKBONES.build("MobileNetV3", **kwargs)
+    backbone = BACKBONES.build("MyBackbone", **kwargs)
 """
 
 from typing import Any, Callable, Dict, Optional
@@ -43,6 +43,8 @@ class Registry:
         def decorator(obj):
             key = name or obj.__name__
             if key in self._registry:
+                if self._registry[key] is obj:
+                    return obj
                 raise KeyError(f"{self._name}: '{key}' is already registered")
             self._registry[key] = obj
             return obj
@@ -50,7 +52,8 @@ class Registry:
         if callable(name):
             obj = name
             key = obj.__name__
-            self._registry[key] = obj
+            if key not in self._registry:
+                self._registry[key] = obj
             return obj
 
         return decorator
