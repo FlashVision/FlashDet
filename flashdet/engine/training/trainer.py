@@ -16,7 +16,7 @@ from flashdet.models.detector import build_model
 from flashdet.models.lora import (
     apply_lora, apply_qlora, merge_lora_weights, get_lora_state_dict,
 )
-from flashdet.data import create_dataloader, verify_dataset
+from flashdet.data import create_dataloader, verify_dataset, verify_training_data
 from flashdet.utils import (
     save_checkpoint, load_checkpoint, save_inference_weights, setup_logger, AverageMeter,
 )
@@ -128,6 +128,7 @@ class Trainer:
         mosaic: bool = False,
         mixup: bool = False,
         copy_paste: bool = False,
+        skip_verify_annotations: bool = False,
         # Config override
         config: Any = None,
     ):
@@ -169,6 +170,7 @@ class Trainer:
         self.mosaic = mosaic
         self.mixup = mixup
         self.copy_paste = copy_paste
+        self.skip_verify_annotations = skip_verify_annotations
 
         self._config = config or get_config()
 
@@ -311,6 +313,34 @@ class Trainer:
             num_workers=self.workers,
             is_train=False,
         )
+
+        # #region agent log
+        try:
+            import json as _j, time as _t
+            with open("/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/.cursor/debug-8c3ea2.log", "a") as _f:
+                _f.write(_j.dumps({"sessionId": "8c3ea2", "hypothesisId": "H1", "location": "trainer.py:after_loaders", "message": "trainer_verify_status", "data": {"entrypoint": "Trainer", "save_dir": self.save_dir, "gt_verify_dir": os.path.join(self.save_dir, "gt_verification"), "cwd": os.getcwd(), "skip_verify": self.skip_verify_annotations, "will_run_verify": not self.skip_verify_annotations}, "timestamp": int(_t.time() * 1000)}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
+        if not self.skip_verify_annotations:
+            ann_ok = verify_training_data(
+                train_ann_file=cfg.data.train_annotations,
+                train_img_dir=cfg.data.train_images,
+                save_dir=self.save_dir,
+                val_ann_file=cfg.data.val_annotations,
+                val_img_dir=cfg.data.val_images,
+                num_classes=num_classes,
+                class_names=class_names,
+                input_size=self.input_size,
+                num_batches=5,
+                num_gt_images=8,
+                log=self._logger,
+            )
+            if not ann_ok:
+                raise RuntimeError(
+                    "Annotation verification failed. Fix annotations or set skip_verify_annotations=True."
+                )
 
         # Build model
         arch = self.architecture.lower()

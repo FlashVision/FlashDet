@@ -27,7 +27,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from flashdet.cfg import get_config
 from flashdet.models import FlashDet
 from flashdet.models.lora import apply_lora, apply_qlora, merge_lora_weights, get_lora_state_dict
-from flashdet.data import create_dataloader, verify_dataset
+from flashdet.data import create_dataloader, verify_dataset, verify_training_data
 from flashdet.utils import save_checkpoint, load_checkpoint, save_weights_only, save_inference_weights, setup_logger, AverageMeter
 from flashdet.utils.metrics import compute_map
 from flashdet.utils.torchtune_optim import (
@@ -122,7 +122,7 @@ def save_visualization(model, images, gt_meta, save_path, epoch, batch_idx, devi
     # #region agent log
     try:
         import json as _json
-        _dbg_log = "/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/.cursor/debug-387c01.log"
+        _dbg_log = "/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/workspace/debug-387c01.log"
         _img_h, _img_w = img_bgr.shape[:2]
         _box_data = {}
         if len(gt_boxes) > 0 and hasattr(gt_boxes, 'shape') and gt_boxes.ndim == 2:
@@ -314,16 +314,12 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
     sub_meters = {}
 
     start_time = time.time()
+    # GT verification images: {save_dir}/gt_verification/images/
+    # Live GT|Pred panels during training: {save_dir}/visualizations/
     vis_dir = os.path.join(save_dir, "visualizations") if save_dir else None
+    VIS_QUEUE_SIZE = 10
     if vis_dir:
         os.makedirs(vis_dir, exist_ok=True)
-        try:
-            vis_files = sorted([f for f in os.listdir(vis_dir) if f.endswith('.jpg') and f != 'latest_visualization.jpg'])
-            if len(vis_files) > 10:
-                for old_file in vis_files[:-10]:
-                    os.remove(os.path.join(vis_dir, old_file))
-        except OSError:
-            pass
 
     raw_model = model.module if hasattr(model, 'module') else model
     if nb is None:
@@ -332,8 +328,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
     zero_pos_batches = 0
     total_batches = 0
 
-    # Multi-scale training: randomly vary input size every 10 batches
-    multi_scale_sizes = [256, 288, 320, 352, 384, 416]
+    multi_scale_sizes = [256, 288, 320, 352, 384, 416] if getattr(config, 'multi_scale', False) else None
     current_ms_size = None
 
     for batch_idx, (images, gt_meta) in enumerate(dataloader):
@@ -350,8 +345,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
 
         images = images.to(device)
 
-        # Multi-scale resize every 10 batches
-        if batch_idx % 10 == 0:
+        # Multi-scale resize every 10 batches (when enabled)
+        if multi_scale_sizes and batch_idx % 10 == 0:
             current_ms_size = random.choice(multi_scale_sizes)
         if current_ms_size is not None and current_ms_size != images.shape[-1]:
             orig_size = float(images.shape[-1])
@@ -364,6 +359,36 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
                 if len(gt_meta["gt_bboxes"][i]) > 0:
                     gt_meta["gt_bboxes"][i] = gt_meta["gt_bboxes"][i] * scale
 
+        # #region agent log
+        if batch_idx < 3 and epoch == 1:
+            try:
+                import json as _json, time as _time
+                _dbg_log = "/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/workspace/debug-387c01.log"
+                _img_shape = list(images.shape)
+                _gt0 = gt_meta["gt_bboxes"][0]
+                _gl0 = gt_meta["gt_labels"][0]
+                _d = {"batch_idx": batch_idx, "img_shape": _img_shape, "ms_size": current_ms_size}
+                if hasattr(_gt0, '__len__') and len(_gt0) > 0:
+                    _b = np.array(_gt0) if not isinstance(_gt0, np.ndarray) else _gt0
+                    _d["n_gt"] = len(_b)
+                    _d["box_x_range"] = [float(_b[:,0].min()), float(_b[:,2].max())]
+                    _d["box_y_range"] = [float(_b[:,1].min()), float(_b[:,3].max())]
+                    _d["box_w_range"] = [float((_b[:,2]-_b[:,0]).min()), float((_b[:,2]-_b[:,0]).max())]
+                    _d["box_h_range"] = [float((_b[:,3]-_b[:,1]).min()), float((_b[:,3]-_b[:,1]).max())]
+                    _d["first5_boxes"] = _b[:5].tolist()
+                    _d["first5_labels"] = list(_gl0[:5]) if hasattr(_gl0, '__getitem__') else []
+                    _d["img_hw"] = [_img_shape[2], _img_shape[3]]
+                    _oob_x = int((_b[:,2] > _img_shape[3] + 2).sum() + (_b[:,0] < -2).sum())
+                    _oob_y = int((_b[:,3] > _img_shape[2] + 2).sum() + (_b[:,1] < -2).sum())
+                    _d["oob_count"] = _oob_x + _oob_y
+                else:
+                    _d["n_gt"] = 0
+                with open(_dbg_log, "a") as _f:
+                    _f.write(_json.dumps({"sessionId":"387c01","hypothesisId":"H1_H2_H4","location":"train.py:train_loop_pre_forward","message":"GT_boxes_pre_forward","data":_d,"timestamp":int(_time.time()*1000)}) + "\n")
+            except Exception as _e:
+                pass
+        # #endregion
+
         with torch.amp.autocast(device.type, enabled=use_amp):
             output = model(images, gt_meta, epoch=epoch)
             loss = output["loss"]
@@ -375,6 +400,19 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
         loss_states = getattr(raw_model, "_last_loss_states", output.get("loss_states", {}))
         total_batches += 1
         num_pos = loss_states.get("o2m_pos", loss_states.get("num_pos"))
+
+        # #region agent log
+        if batch_idx < 3 and epoch == 1:
+            try:
+                import json as _json, time as _time
+                _dbg_log = "/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/workspace/debug-387c01.log"
+                _ls = {k: (v.item() if hasattr(v,'item') else v) for k, v in loss_states.items()}
+                _ls["total_loss"] = float(output["loss"].mean().item() if output["loss"].dim() > 0 else output["loss"].item())
+                with open(_dbg_log, "a") as _f:
+                    _f.write(_json.dumps({"sessionId":"387c01","hypothesisId":"H4_loss","location":"train.py:post_forward","message":"loss_state","data":{"batch_idx":batch_idx,"loss_states":_ls},"timestamp":int(_time.time()*1000)}) + "\n")
+            except Exception:
+                pass
+        # #endregion
         num_pos_val = num_pos.item() if hasattr(num_pos, "item") else (num_pos or 0)
         if num_pos_val == 0:
             zero_pos_batches += 1
@@ -416,15 +454,20 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
         is_last_batch = (batch_idx + 1) == len(dataloader)
         if vis_dir and _is_main_process() and ((batch_idx + 1) % 20 == 0 or is_last_batch):
             try:
-                vis_path = os.path.join(vis_dir, f"epoch{epoch}_batch{batch_idx+1}.jpg")
+                vis_path = os.path.join(vis_dir, f"epoch{epoch:04d}_batch{batch_idx+1:04d}.jpg")
                 save_visualization(model, images, gt_meta, vis_path, epoch, batch_idx + 1, device, config,
                                    class_names=class_names, colors=colors)
                 
-                vis_files = sorted([f for f in os.listdir(vis_dir) if f.endswith('.jpg') and f != 'latest_visualization.jpg'])
-                if len(vis_files) > 10:
-                    for old_file in vis_files[:-10]:
+                vis_files = [
+                    f for f in os.listdir(vis_dir)
+                    if f.endswith('.jpg') and f != 'latest_visualization.jpg'
+                ]
+                if len(vis_files) > VIS_QUEUE_SIZE:
+                    vis_files_full = [os.path.join(vis_dir, f) for f in vis_files]
+                    vis_files_full.sort(key=os.path.getmtime)
+                    for old_path in vis_files_full[:-VIS_QUEUE_SIZE]:
                         try:
-                            os.remove(os.path.join(vis_dir, old_file))
+                            os.remove(old_path)
                         except OSError:
                             pass
             except Exception as e:
@@ -495,6 +538,26 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None):
             sub_meters[key].update(v)
 
         results = eval_model.predict(images, None, score_thr=0.01)
+
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            _dbg_log = "/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/workspace/debug-387c01.log"
+            _total_dets = sum(r[0].shape[0] if r[0].numel() > 0 else 0 for r in results)
+            _max_score = max((r[0][:,4].max().item() if r[0].numel() > 0 else 0.0) for r in results)
+            # Also get raw logit stats
+            _em = eval_model
+            _feats = _em.backbone(images)
+            _nf = _em.neck(_feats)
+            _ho = _em.head(_nf, training=False)
+            _raw_cls = _ho['o2o_cls'].sigmoid()
+            _ms, _ = _raw_cls.max(dim=2)
+            with open(_dbg_log, "a") as _f:
+                _f.write(_json.dumps({"sessionId":"387c01","hypothesisId":"H_val_scores","location":"train.py:validate","message":"val_pred_scores","data":{"total_dets":_total_dets,"max_pred_score":_max_score,"raw_sigmoid_max":float(_ms.max()),"raw_sigmoid_mean":float(_ms.mean()),"scores_gt_03":int((_ms>0.3).sum()),"scores_gt_01":int((_ms>0.1).sum()),"n_gt_this_batch":sum(len(gt_meta["gt_bboxes"][i]) for i in range(len(gt_meta["gt_bboxes"])))},"timestamp":int(_time.time()*1000)}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
         for i, (dets, lbs) in enumerate(results):
             gt_boxes  = gt_meta["gt_bboxes"][i]
             gt_labels = gt_meta["gt_labels"][i]
@@ -632,8 +695,15 @@ def main():
                            help="Enable 4-image mosaic augmentation (richer spatial context)")
     aug_group.add_argument("--mixup", action="store_true",
                            help="Enable MixUp augmentation (image blending)")
+    aug_group.add_argument("--multi-scale", action="store_true",
+                           help="Enable multi-scale training (varies input size [256-416]; "
+                                "only recommended for large datasets like COCO)")
+
     aug_group.add_argument("--copy-paste", action="store_true",
                            help="Enable Copy-Paste augmentation (instance copying)")
+
+    parser.add_argument("--skip-verify-annotations", action="store_true",
+                        help="Skip pre-training annotation/dataloader verification")
 
     args = parser.parse_args()
 
@@ -790,6 +860,31 @@ def main():
         aug_flags.append("CopyPaste")
     if aug_flags:
         logger.info(f"Augmentations: {', '.join(aug_flags)}")
+
+    if not args.skip_verify_annotations and is_main:
+        # #region agent log
+        try:
+            import json as _j, time as _t
+            with open("/home/ggoswami/Project/Gaurav/FlashVision/FlashDet/.cursor/debug-8c3ea2.log", "a") as _f:
+                _f.write(_j.dumps({"sessionId": "8c3ea2", "hypothesisId": "H1_H3_H4", "location": "train.py:verify_block", "message": "verify_gate", "data": {"entrypoint": "train.py", "skip_verify": args.skip_verify_annotations, "is_main": is_main, "save_dir": args.save_dir, "gt_verify_dir": os.path.join(args.save_dir, "gt_verification"), "cwd": os.getcwd(), "will_run": True}, "timestamp": int(_t.time() * 1000)}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        ann_ok = verify_training_data(
+            train_ann_file=config.data.train_annotations,
+            train_img_dir=config.data.train_images,
+            save_dir=args.save_dir,
+            val_ann_file=config.data.val_annotations,
+            val_img_dir=config.data.val_images,
+            num_classes=num_classes,
+            class_names=class_names,
+            input_size=input_size,
+            num_batches=5,
+            num_gt_images=8,
+            log=logger,
+        )
+        if not ann_ok:
+            sys.exit(1)
     
     # Create model
     logger.info("\nBuilding model...")

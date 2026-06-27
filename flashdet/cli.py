@@ -170,7 +170,11 @@ def cmd_train(args):
         from flashdet.cfg import load_yaml_config
         cfg = load_yaml_config(args.config)
         print(f"{_colored('Config:', 'bold')} {args.config}")
-        trainer = Trainer(config=cfg, device=args.device)
+        trainer = Trainer(
+            config=cfg,
+            device=args.device,
+            skip_verify_annotations=getattr(args, "skip_verify_annotations", False),
+        )
     else:
         if not args.train_images or not args.val_images:
             print(_colored("Error:", "red") + " --train-images and --val-images are required (or use --config)")
@@ -199,6 +203,8 @@ def cmd_train(args):
             kwargs["mosaic"] = True
         if args.mixup:
             kwargs["mixup"] = True
+        if getattr(args, "skip_verify_annotations", False):
+            kwargs["skip_verify_annotations"] = True
         trainer = Trainer(**kwargs)
 
     trainer.train()
@@ -367,6 +373,8 @@ Documentation: https://github.com/FlashVision/FlashDet
     train_p.add_argument("--amp", action="store_true", help="Enable mixed precision (FP16)")
     train_p.add_argument("--mosaic", action="store_true", help="Enable mosaic augmentation")
     train_p.add_argument("--mixup", action="store_true", help="Enable MixUp augmentation")
+    train_p.add_argument("--skip-verify-annotations", action="store_true",
+                         help="Skip pre-training dataloader/GT verification")
     train_p.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
 
     # predict
