@@ -27,7 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from flashdet.registry import DETECTORS
-from flashdet.models.layers.micro_block import MicroBlock, MicroDown, ECALayer
+from flashdet.models.layers.micro_block import MicroBlock, MicroDown
 from flashdet.models.layers.conv_module import ConvModule
 from flashdet.losses.e2e_loss import E2EDetectionLoss
 from flashdet.utils.bbox import make_anchor_grid, decode_batch_nms_free
