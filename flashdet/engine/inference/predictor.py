@@ -61,13 +61,20 @@ class Predictor:
             cfg = ckpt["config"]
             arch = cfg.get("architecture", "flashdet")
             num_classes = cfg.get("num_classes", 80)
+            model_size = cfg.get("model_size", "n")
+            input_size = cfg.get("input_size", self.input_size)
+            if isinstance(input_size, (list, tuple)):
+                input_size = input_size[0]
+            self.input_size = input_size
         else:
             arch = "flashdet"
             num_classes = 80
+            model_size = "n"
 
         from flashdet.cfg import get_config
         config = get_config(num_classes=num_classes)
         config.model.architecture = arch
+        config.model.size = model_size
 
         if arch in ("yolov8", "yolov9", "yolov10", "yolov11", "yolox"):
             config.model.width_mult = ckpt.get("config", {}).get("width_mult", 1.0)
@@ -81,8 +88,11 @@ class Predictor:
         model.load_state_dict(state_dict, strict=False)
         model = model.to(self.device).eval()
 
-        if self.class_names is None and "class_names" in ckpt:
-            self.class_names = ckpt["class_names"]
+        if self.class_names is None:
+            if "class_names" in ckpt:
+                self.class_names = ckpt["class_names"]
+            elif "config" in ckpt and "class_names" in ckpt["config"]:
+                self.class_names = ckpt["config"]["class_names"]
 
         return model, num_classes
 
