@@ -36,6 +36,7 @@ from flashdet.models.neck.pico_neck import PicoNeck
 from flashdet.models.head.e2e_head import E2EDualHead
 from flashdet.losses.e2e_loss import E2EDetectionLoss
 from flashdet.utils.bbox import make_anchor_grid, decode_batch_nms_free
+from flashdet.models.architectures.flashdet_micro import FlashDetMicro  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SIZE_CONFIGS = {
+    "u": {"type": "micro"},
     "p": {"type": "pico"},
     "n": {"stem": 32,  "depths": (2, 4, 2),   "neck_ch": 96,  "neck_blocks": 1},
     "s": {"stem": 48,  "depths": (3, 6, 3),   "neck_ch": 128, "neck_blocks": 1},
@@ -80,7 +82,7 @@ class FlashDetPico(nn.Module):
         num_classes: int = 80,
         strides: Tuple[int, ...] = (8, 16, 32),
         total_epochs: int = 100,
-        neck_channels: int = 64,
+        neck_channels: int = 80,
         pretrained_backbone: bool = True,
         backbone_type: str = "lite",
         **kwargs,
@@ -97,9 +99,9 @@ class FlashDetPico(nn.Module):
 
         if backbone_type in ("pico_v2", "repnext"):
             self.backbone = PicoBackbone(
-                stem_channels=24,
-                stage_channels=(48, 96, 192),
-                stage_depths=(2, 3, 1),
+                stem_channels=28,
+                stage_channels=(56, 112, 224),
+                stage_depths=(2, 4, 2),
                 out_stages=(0, 1, 2),
                 activation="LeakyReLU",
             )
@@ -126,11 +128,11 @@ class FlashDetPico(nn.Module):
             num_classes=num_classes,
             strides=strides,
             alpha_init=kwargs.get("prog_alpha_init", 0.8),
-            alpha_final=kwargs.get("prog_alpha_final", 0.3),
+            alpha_final=kwargs.get("prog_alpha_final", 0.2),
             o2m_topk=kwargs.get("o2m_topk", 10),
             o2o_topk=kwargs.get("o2o_topk", 7),
             box_weight=kwargs.get("box_weight", 7.5),
-            cls_weight=kwargs.get("cls_weight", 0.5),
+            cls_weight=kwargs.get("cls_weight", 1.0),
             l1_weight=kwargs.get("l1_weight", 1.5),
         )
 
@@ -281,6 +283,8 @@ class FlashDet(nn.Module):
     """
 
     def __new__(cls, num_classes=80, size="n", **kwargs):
+        if size == "u":
+            return FlashDetMicro(num_classes=num_classes, **kwargs)
         if size == "p":
             return FlashDetPico(num_classes=num_classes, **kwargs)
         return super().__new__(cls)
@@ -294,8 +298,8 @@ class FlashDet(nn.Module):
         neck_channels: Optional[int] = None,
         strides: Tuple[int, ...] = (8, 16, 32),
         total_epochs: int = 100,
-        prog_alpha_init: float = 1.0,
-        prog_alpha_final: float = 0.0,
+        prog_alpha_init: float = 0.8,
+        prog_alpha_final: float = 0.2,
         o2m_topk: int = 10,
         o2o_topk: int = 7,
         box_weight: float = 7.5,
@@ -303,7 +307,7 @@ class FlashDet(nn.Module):
         l1_weight: float = 1.5,
         **kwargs,
     ):
-        if size == "p":
+        if size in ("p", "u"):
             return
         super().__init__()
 

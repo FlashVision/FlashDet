@@ -273,7 +273,7 @@ def _save_training_csv(history, csv_path):
 def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_dir=None, config=None, ema=None,
                     class_names=None, colors=None, scaler=None, grad_accum=1,
                     nb=None, nw=-1, warmup_momentum=0.8, base_momentum=0.937, lf=None, base_lr=0.001):
-    """Train for one epoch with iteration-based warmup."""
+    """Train for one epoch."""
     model.train()
     use_amp = scaler is not None
 
@@ -281,8 +281,6 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
     sub_meters = {}
 
     start_time = time.time()
-    # GT verification images: {save_dir}/gt_verification/images/
-    # Live GT|Pred panels during training: {save_dir}/visualizations/
     vis_dir = os.path.join(save_dir, "visualizations") if save_dir else None
     VIS_QUEUE_SIZE = 10
     if vis_dir:
@@ -299,17 +297,6 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
     current_ms_size = None
 
     for batch_idx, (images, gt_meta) in enumerate(dataloader):
-        # Iteration-based warmup
-        ni = batch_idx + nb * (epoch - 1)
-        if ni <= nw:
-            xi = [0, nw]
-            for pg in optimizer.param_groups:
-                pg['lr'] = np.interp(
-                    ni, xi, [0.0, pg.get('initial_lr', base_lr) * (lf(epoch - 1) if lf else 1.0)]
-                )
-                if 'momentum' in pg:
-                    pg['momentum'] = np.interp(ni, xi, [warmup_momentum, base_momentum])
-
         images = images.to(device)
 
         # Multi-scale resize every 10 batches (when enabled)
@@ -426,7 +413,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
 
 
 @torch.no_grad()
-def validate(model, dataloader, device, logger, ema=None, class_names=None):
+def validate(model, dataloader, device, logger, ema=None, class_names=None,
+             epoch=0, total_epochs=100):
     """
     Validate model — computes both loss and mAP@0.5.
 
@@ -450,7 +438,7 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None):
     for images, gt_meta in dataloader:
         images = images.to(device)
 
-        out = eval_model(images, gt_meta, epoch=0, compute_loss=True)
+        out = eval_model(images, gt_meta, epoch=epoch, compute_loss=True)
 
         if "loss" in out:
             loss_meter.update(out["loss"].item())
@@ -516,7 +504,7 @@ def main():
                         help="Path to YAML config file")
     parser.add_argument("--epochs", type=int, default=100, help="Training epochs")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
-    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate (base LR for batch=64; auto-scaled for effective batch)")
     parser.add_argument("--workers", type=int, default=4, help="Data workers")
     parser.add_argument("--save-dir", default="workspace/flashdet_output", help="Save directory")
     parser.add_argument("--resume", default=None, help="Resume from checkpoint")
@@ -528,8 +516,8 @@ def main():
                         help="Early stopping patience (epochs without mAP improvement). 0 disables.")
     parser.add_argument("--val-interval", type=int, default=None,
                         help="Run validation/mAP every N epochs (default: config value, usually 5). Set to 1 for every epoch.")
-    parser.add_argument("--model-size", default="n", choices=["p", "n", "s", "m", "l", "x"],
-                        help="Model size: p (~298K pico), n (~1.5M), s (~5.4M), m (~18M), l, x")
+    parser.add_argument("--model-size", default="n", choices=["u", "p", "n", "s", "m", "l", "x"],
+                        help="Model size: u (~234K micro), p (~298K pico), n (~1.5M), s (~5.4M), m (~18M), l, x")
     parser.add_argument("--backbone", default="lite",
                         choices=["lite", "pico_v2"],
                         help="Pico backbone: lite (LiteBackbone), pico_v2 (PicoBackbone)")
@@ -537,8 +525,8 @@ def main():
                         choices=["flashdet", "yolov8", "yolov9", "yolov10", "yolov11", "yolox"],
                         help="Detection architecture (default: flashdet)")
     parser.add_argument("--input-size", type=int, default=320, help="Input image size (320 or 416)")
-    parser.add_argument("--optimizer", default="musgd", choices=["musgd", "adamw", "sgd"],
-                        help="Optimizer: musgd (default), adamw, sgd")
+    parser.add_argument("--optimizer", default="adamw", choices=["musgd", "adamw", "sgd"],
+                        help="Optimizer: adamw (default), musgd, sgd")
     parser.add_argument("--weight-decay", type=float, default=0.05,
                         help="Weight decay (default: 0.05)")
     parser.add_argument("--finetune", default=None,
@@ -925,12 +913,28 @@ def main():
     if device.type == "cuda":
         log_memory_stats(device, prefix="Pre-optimizer")
 
-    # Optimizer and scheduler
-    base_lr = args.lr
+    # Optimizer and scheduler — auto-scale LR with effective batch size
+    nbs = 64  # nominal batch size for base LR
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    effective_bs = args.batch_size * grad_accum * world_size
+    lr_scale = effective_bs / nbs
+    base_lr = args.lr * lr_scale
+    logger.info(f"LR auto-scale: base={args.lr} x {lr_scale:.2f} (eff_bs={effective_bs}, nbs={nbs}) -> {base_lr:.6f}")
 
-    opt_type = getattr(args, "optimizer", "musgd")
+    opt_type = getattr(args, "optimizer", "adamw")
     wd = args.weight_decay
-    if opt_type == "musgd" and not args.optimizer_in_bwd:
+    if opt_type in ("sgd", "musgd") and wd > 0.01:
+        wd = 0.0005
+        logger.info(f"Weight decay auto-adjusted to {wd} for SGD-family optimizer")
+    if opt_type == "adamw" and not args.optimizer_in_bwd:
+        logger.info(f"Optimizer: AdamW (lr={base_lr:.6f}, wd={wd})")
+        optimizer = torch.optim.AdamW(
+            raw_model.parameters(),
+            lr=base_lr,
+            betas=(0.9, 0.999),
+            weight_decay=wd,
+        )
+    elif opt_type == "musgd" and not args.optimizer_in_bwd:
         logger.info("Optimizer: MuSGD")
         optimizer = build_musgd(
             raw_model,
@@ -955,14 +959,17 @@ def main():
             optimizer_in_bwd=args.optimizer_in_bwd,
             betas=(0.9, 0.999),
         )
-    
-    # LR schedule: cosine decay from lr0 to lr0*lrf
-    lrf = 0.01
 
-    def one_cycle(y1=0.0, y2=1.0, steps=100):
-        return lambda x: max((1 - math.cos(x * math.pi / steps)) / 2, 0) * (y2 - y1) + y1
+    # LR schedule: linear warmup + cosine annealing
+    lrf = 0.1  # final LR = 10% of peak (was 0.01 = 1%, too aggressive)
+    warmup_epochs = args.warmup_epochs
 
-    lf = one_cycle(1, lrf, args.epochs)
+    def lf(epoch):
+        """Combined linear warmup + cosine annealing. Single source of truth for LR."""
+        if epoch < warmup_epochs:
+            return max((epoch + 1) / (warmup_epochs + 1), 0.01)
+        progress = (epoch - warmup_epochs) / max(args.epochs - warmup_epochs - 1, 1)
+        return lrf + (1 - lrf) * 0.5 * (1 + math.cos(math.pi * progress))
 
     def sync_lr_after_resume(start_ep: int) -> float:
         factor = lf(start_ep)
@@ -983,7 +990,7 @@ def main():
 
     logger.info(f"Base LR: {base_lr}, Final LR: {base_lr * lrf:.6f} (lrf={lrf})")
     logger.info(f"Weight Decay: {wd}")
-    logger.info(f"Warmup: {args.warmup_epochs} epochs (iteration-based)")
+    logger.info(f"Warmup: {warmup_epochs} epochs")
 
     # --- torchtune optimizations summary ---
     tt_flags = []
@@ -1096,27 +1103,25 @@ def main():
     os.makedirs(plots_dir, exist_ok=True)
 
     for epoch in range(start_epoch, args.epochs):
-        # Step scheduler at epoch start
+        # Set LR via scheduler BEFORE training
         if scheduler is not None:
-            scheduler.step()
+            if epoch > 0:
+                scheduler.step()
+        elif args.optimizer_in_bwd:
+            lr_factor = lf(epoch)
+            current_lr = base_lr * lr_factor
+            optimizer.set_lr(current_lr)
 
         # Set epoch on distributed sampler for proper shuffling
         if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
 
-        # For optimizer_in_bwd, manually compute and set the LR each epoch
-        if args.optimizer_in_bwd:
-            lr_factor = lf(epoch)
-            current_lr = base_lr * lr_factor
-            optimizer.set_lr(current_lr)
-        else:
-            current_lr = optimizer.param_groups[0]["lr"]
+        current_lr = optimizer.param_groups[0]["lr"]
         logger.info(f"\nEpoch {epoch + 1}/{args.epochs} "
                     f"(lr={current_lr:.6f}, ema_decay={ema.decay:.6f})")
         
         epoch_start = time.time()
 
-        # Train (with iteration-based warmup)
         train_losses = train_one_epoch(
             model, train_loader, optimizer, device, epoch + 1, logger,
             save_dir=args.save_dir, config=config, ema=ema,
@@ -1157,7 +1162,8 @@ def main():
         # Only rank 0 runs validation and saves checkpoints in DDP.
         if is_main and (epoch + 1) % val_interval == 0:
             val_loss, map50, val_sub = validate(
-                raw_model, val_loader, device, logger, ema=ema, class_names=class_names
+                raw_model, val_loader, device, logger, ema=ema, class_names=class_names,
+                epoch=epoch, total_epochs=args.epochs,
             )
 
             # Record validation metrics to history

@@ -280,11 +280,15 @@ def cmd_export(args):
     cfg_data = ckpt.get("config", {})
     arch = cfg_data.get("architecture", "flashdet")
     num_classes = cfg_data.get("num_classes", 80)
+    model_size = cfg_data.get("model_size", "n")
     input_size = cfg_data.get("input_size", 640)
+    if isinstance(input_size, (list, tuple)):
+        input_size = input_size[0]
 
     config = get_config(num_classes=num_classes)
     config.model.architecture = arch
-    if arch in ("yolov9", "yolov10", "yolov11"):
+    config.model.size = model_size
+    if arch in ("yolov8", "yolov9", "yolov10", "yolov11"):
         config.model.width_mult = cfg_data.get("width_mult", 1.0)
         config.model.depth_mult = cfg_data.get("depth_mult", 1.0)
 
@@ -293,9 +297,22 @@ def cmd_export(args):
     model.load_state_dict(state_dict, strict=False)
     model.eval()
 
+    class _ExportWrapper(torch.nn.Module):
+        """Wrapper that returns only tensor outputs for ONNX export."""
+        def __init__(self, model):
+            super().__init__()
+            self.model = model
+
+        def forward(self, x):
+            out = self.model(x)
+            return torch.cat([out["o2o_cls"], out["o2o_reg"]], dim=-1)
+
+    wrapper = _ExportWrapper(model)
+    wrapper.eval()
+
     dummy = torch.randn(1, 3, input_size, input_size)
     torch.onnx.export(
-        model, dummy, output_path,
+        wrapper, dummy, output_path,
         input_names=["images"],
         output_names=["output"],
         opset_version=13,
