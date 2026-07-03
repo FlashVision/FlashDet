@@ -1,7 +1,7 @@
 """FlashDet-Micro — Sub-0.5MB Object Detector with Unified MicroBlock.
 
 Architecture using the same MicroBlock across backbone, neck, and head.
-Target: < 262K inference params = < 0.5MB FP16 weight file.
+Target: ~500K inference params = ~0.9MB FP16 weight file.
 
 Key innovations:
   - MicroBlock: Reparameterizable DW conv + ECA attention + residual
@@ -10,13 +10,13 @@ Key innovations:
   - ECA channel attention for accuracy boost with negligible cost
 
 Architecture:
-  - MicroBackbone: Stem → 3 stages of MicroDown + MicroBlock stacks
-  - MicroNeck: PAN-FPN with MicroBlock fusion blocks
+  - MicroBackbone: Stem(32) → stages [64, 128, 224] at strides [8, 16, 32]
+  - MicroNeck: PAN-FPN with 96-ch MicroBlock fusion
   - MicroDualHead: Weight-shared dual head using MicroBlock
 
 Model Stats (default config):
-  - Inference params: ~234K (~0.45 MB FP16)
-  - Deployed params:  ~224K (~0.43 MB FP16, after reparameterization)
+  - Inference params: ~462K (~0.88 MB FP16)
+  - Deployed params:  ~448K (~0.86 MB FP16, after reparameterization)
 """
 
 import logging
@@ -279,18 +279,18 @@ class MicroDualHead(nn.Module):
 
 @DETECTORS.register("FlashDetMicro")
 class FlashDetMicro(nn.Module):
-    """FlashDet-Micro — Sub-0.5MB NMS-free object detector.
+    """FlashDet-Micro — Sub-1MB NMS-free object detector.
 
     Uses a single unified MicroBlock across backbone, neck, and head.
     Weight-shared head across all 3 FPN levels for maximum efficiency.
 
     Architecture:
-      - MicroBackbone: stem(24) → stages [48, 96, 160] at strides [8, 16, 32]
-      - MicroNeck: PAN-FPN with 64-ch MicroBlock fusion
+      - MicroBackbone: stem(32) → stages [64, 128, 224] at strides [8, 16, 32]
+      - MicroNeck: PAN-FPN with 96-ch MicroBlock fusion
       - MicroDualHead: shared o2o + o2m using MicroBlock
       - Same E2EDetectionLoss (STAL + ProgLoss) as larger FlashDet models
 
-    Target: < 262K inference params = < 0.5MB FP16 weight file.
+    Target: ~500K inference params = ~0.9MB FP16 weight file.
     """
 
     def __init__(
@@ -298,10 +298,10 @@ class FlashDetMicro(nn.Module):
         num_classes: int = 80,
         strides: Tuple[int, ...] = (8, 16, 32),
         total_epochs: int = 100,
-        stem_channels: int = 24,
-        stage_channels: Tuple[int, ...] = (48, 96, 160),
-        stage_depths: Tuple[int, ...] = (2, 3, 2),
-        neck_channels: int = 64,
+        stem_channels: int = 32,
+        stage_channels: Tuple[int, ...] = (64, 128, 224),
+        stage_depths: Tuple[int, ...] = (2, 4, 2),
+        neck_channels: int = 96,
         **kwargs,
     ):
         super().__init__()

@@ -1,6 +1,9 @@
 """
 PicoNeck Feature Pyramid Network for FlashDet.
-Matches official FlashDet implementation.
+
+Integrates DySample (ICCV 2023) from FlashDownUP for learned upsampling
+in the FPN path — replaces bilinear interpolation with content-aware
+point sampling. Only ~2.6K params per instance, significant quality gain.
 """
 
 import math
@@ -9,6 +12,88 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from flashdet.models.layers.conv_module import ConvModule, DepthwiseConvModule
+
+
+# ---------------------------------------------------------------------------
+# DySample — Dynamic Point-Sampling Upsampler (ICCV 2023)
+# From FlashVision/FlashDownUP: https://github.com/FlashVision/FlashDownUP
+# Paper: "Learning to Upsample by Learning to Sample" (arXiv:2308.15085)
+# ---------------------------------------------------------------------------
+
+class DySample(nn.Module):
+    """Content-aware upsampler that learns sampling offsets dynamically.
+
+    Instead of fixed bilinear kernels, generates per-pixel sampling offsets
+    via a lightweight 1x1 conv, then uses grid_sample for the actual
+    resampling.  Only ~2.6K params for 80-ch input (vs 0 for bilinear),
+    but significantly better feature quality in FPN paths.
+    """
+
+    def __init__(self, in_channels: int, scale: int = 2, groups: int = 4,
+                 style: str = "lp"):
+        super().__init__()
+        self.scale = scale
+        self.style = style
+        self.groups = groups
+        assert style in ("lp", "pl")
+        if style == "pl":
+            assert in_channels >= scale ** 2 and in_channels % scale ** 2 == 0
+        assert in_channels >= groups and in_channels % groups == 0
+
+        if style == "pl":
+            offset_in = in_channels // (scale ** 2)
+            out_ch = 2 * groups
+        else:
+            offset_in = in_channels
+            out_ch = 2 * groups * scale ** 2
+
+        self.offset = nn.Conv2d(offset_in, out_ch, 1)
+        nn.init.normal_(self.offset.weight, std=0.001)
+        nn.init.zeros_(self.offset.bias)
+
+        self.register_buffer("init_pos", self._init_pos())
+
+    def _init_pos(self):
+        h = torch.arange((-self.scale + 1) / 2,
+                         (self.scale - 1) / 2 + 1) / self.scale
+        return (
+            torch.stack(torch.meshgrid(h, h, indexing="ij"))
+            .transpose(1, 2)
+            .repeat(1, self.groups, 1)
+            .reshape(1, -1, 1, 1)
+        )
+
+    def _sample(self, x: torch.Tensor, offset: torch.Tensor) -> torch.Tensor:
+        B, _, H, W = offset.shape
+        offset = offset.view(B, 2, -1, H, W)
+        coords_h = torch.arange(H, dtype=x.dtype, device=x.device) + 0.5
+        coords_w = torch.arange(W, dtype=x.dtype, device=x.device) + 0.5
+        coords = (
+            torch.stack(torch.meshgrid(coords_w, coords_h, indexing="ij"))
+            .transpose(1, 2).unsqueeze(1).unsqueeze(0).to(x.device)
+        )
+        normalizer = torch.tensor(
+            [W, H], dtype=x.dtype, device=x.device
+        ).view(1, 2, 1, 1, 1)
+        coords = 2 * (coords + offset) / normalizer - 1
+        coords = (
+            F.pixel_shuffle(coords.view(B, -1, H, W), self.scale)
+            .view(B, 2, -1, self.scale * H, self.scale * W)
+            .permute(0, 2, 3, 4, 1).contiguous().flatten(0, 1)
+        )
+        return F.grid_sample(
+            x.reshape(B * self.groups, -1, H, W), coords,
+            mode="bilinear", align_corners=False, padding_mode="border",
+        ).view(B, -1, self.scale * H, self.scale * W)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.style == "pl":
+            x_ = F.pixel_shuffle(x, self.scale)
+            offset = (F.pixel_unshuffle(self.offset(x_), self.scale)
+                      * 0.25 + self.init_pos)
+        else:
+            offset = self.offset(x) * 0.25 + self.init_pos
+        return self._sample(x, offset)
 
 
 class LiteModule(nn.Module):
@@ -191,9 +276,14 @@ class PicoNeck(nn.Module):
         self.in_channels = in_channels
         self.out_channels = out_channels
 
-        self.upsample = nn.Upsample(scale_factor=2, mode="bilinear")
-
         Conv = DepthwiseConvModule if use_depthwise else ConvModule
+
+        # DySample learned upsamplers for top-down path (from FlashDownUP)
+        self.upsamplers = nn.ModuleList()
+        for _ in range(len(in_channels) - 1):
+            self.upsamplers.append(
+                DySample(out_channels, scale=2, groups=4, style="lp")
+            )
 
         # Reduce layers (lateral connections)
         self.reduce_layers = nn.ModuleList()
@@ -254,17 +344,21 @@ class PicoNeck(nn.Module):
         # Reduce channels
         inputs = [reduce(x) for reduce, x in zip(self.reduce_layers, inputs)]
         
-        # Top-down path
+        # Top-down path (DySample learned upsampling from FlashDownUP)
         inner_outs = [inputs[-1]]
         for idx in range(len(self.in_channels) - 1, 0, -1):
             feat_high = inner_outs[0]
             feat_low = inputs[idx - 1]
-            
-            upsample_feat = F.interpolate(
-                feat_high, size=feat_low.shape[2:], mode="bilinear", align_corners=False
-            )
-            
-            inner_out = self.top_down_blocks[len(self.in_channels) - 1 - idx](
+
+            up_idx = len(self.in_channels) - 1 - idx
+            upsample_feat = self.upsamplers[up_idx](feat_high)
+            if upsample_feat.shape[2:] != feat_low.shape[2:]:
+                upsample_feat = F.interpolate(
+                    upsample_feat, size=feat_low.shape[2:],
+                    mode="bilinear", align_corners=False,
+                )
+
+            inner_out = self.top_down_blocks[up_idx](
                 torch.cat([upsample_feat, feat_low], dim=1)
             )
             inner_outs.insert(0, inner_out)
