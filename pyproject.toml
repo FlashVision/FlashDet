@@ -44,7 +44,7 @@ tracker = ["scipy>=1.10.0", "lap>=0.4.0"]
 solutions = ["scipy>=1.10.0"]
 analytics = ["matplotlib>=3.7.0", "pandas>=2.0.0"]
 all = ["onnx>=1.14.0", "onnxruntime>=1.15.0", "onnxsim>=0.4.0", "scipy>=1.10.0", "lap>=0.4.0", "matplotlib>=3.7.0", "pandas>=2.0.0"]
-dev = ["pytest>=7.0", "pytest-timeout>=2.1", "pytest-cov>=4.0", "ruff", "pre-commit"]
+dev = ["pytest>=7.0", "pytest-timeout>=2.1", "pytest-cov>=4.0", "ruff>=0.15,<0.16", "pre-commit"]
 
 [project.urls]
 Homepage = "https://github.com/FlashVision/FlashDet"
@@ -88,4 +88,7 @@ exclude_lines = [
 line-length = 120
 
 [tool.ruff.lint]
+# Keep CI deterministic across Ruff releases. Expand this deliberately when
+# the codebase is ready for pyupgrade / isort / RUF rules.
+select = ["E4", "E7", "E9", "F"]
 ignore = ["E741"]
