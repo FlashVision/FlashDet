@@ -18,7 +18,12 @@ import json
 import os
 import sys
 
-import matplotlib
+try:
+    import matplotlib
+except ImportError as exc:  # pragma: no cover - depends on the extras
+    raise SystemExit(
+        "matplotlib is required for plotting: pip install 'flashdet[analytics]'"
+    ) from exc
 
 matplotlib.use("Agg")
 

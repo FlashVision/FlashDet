@@ -353,8 +353,9 @@ python scripts/plot_pipeline.py \
 
 The released demo checkpoint is FP16, so the script upcasts it before
 measuring the FP32 baseline. It exports every artifact, measures each stage,
-and writes the table plus a JSON report (`--output`). The dataset generator is
-seeded, so the demo numbers are reproducible; your own checkpoint and
+and writes the table plus a JSON report (`--output`). The dashboard renderer
+needs matplotlib (`pip install "flashdet[analytics]"`). The dataset generator
+is seeded, so the demo numbers are reproducible; your own checkpoint and
 validation split will give different absolute values but the same relative
 ordering.
 

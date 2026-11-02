@@ -8,6 +8,7 @@ point sampling. Only ~2.6K params per instance, significant quality gain.
 
 import math
 import torch
+import torch.fx
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -19,6 +20,27 @@ from flashdet.models.layers.conv_module import ConvModule, DepthwiseConvModule
 # From FlashVision/FlashDownUP: https://github.com/FlashVision/FlashDownUP
 # Paper: "Learning to Upsample by Learning to Sample" (arXiv:2308.15085)
 # ---------------------------------------------------------------------------
+
+@torch.fx.wrap
+def _sampling_grid(h, w, ref: torch.Tensor):
+    """Coordinate grid used by DySample.
+
+    Wrapped for torch.fx so tracing emits one call_function node instead of
+    evaluating ``arange`` with symbolic shape/device/dtype values, which older
+    torch releases reject.
+    """
+    dtype, device = ref.dtype, ref.device
+    coords_h = torch.arange(h, dtype=dtype, device=device) + 0.5
+    coords_w = torch.arange(w, dtype=dtype, device=device) + 0.5
+    coords = (
+        torch.stack(torch.meshgrid(coords_w, coords_h, indexing="ij"))
+        .transpose(1, 2).unsqueeze(1).unsqueeze(0).to(device)
+    )
+    normalizer = torch.tensor(
+        [w, h], dtype=dtype, device=device
+    ).view(1, 2, 1, 1, 1)
+    return coords, normalizer
+
 
 class DySample(nn.Module):
     """Content-aware upsampler that learns sampling offsets dynamically.
@@ -66,15 +88,7 @@ class DySample(nn.Module):
     def _sample(self, x: torch.Tensor, offset: torch.Tensor) -> torch.Tensor:
         B, _, H, W = offset.shape
         offset = offset.reshape(B, 2, -1, H, W)
-        coords_h = torch.arange(H, dtype=x.dtype, device=x.device) + 0.5
-        coords_w = torch.arange(W, dtype=x.dtype, device=x.device) + 0.5
-        coords = (
-            torch.stack(torch.meshgrid(coords_w, coords_h, indexing="ij"))
-            .transpose(1, 2).unsqueeze(1).unsqueeze(0).to(x.device)
-        )
-        normalizer = torch.tensor(
-            [W, H], dtype=x.dtype, device=x.device
-        ).view(1, 2, 1, 1, 1)
+        coords, normalizer = _sampling_grid(H, W, x)
         coords = 2 * (coords + offset) / normalizer - 1
         coords = (
             F.pixel_shuffle(coords.reshape(B, -1, H, W), self.scale)
