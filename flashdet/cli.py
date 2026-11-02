@@ -399,8 +399,9 @@ def cmd_fuse(args):
             print("  warning: checkpoint has no config; the saved fused file "
                   "may not rebuild correctly")
         from flashdet.fusing.checkpoint import save_fused_checkpoint
+        saved = fused.half() if args.half else fused
         path = save_fused_checkpoint(
-            fused, args.output, config=config or {},
+            saved, args.output, config=config or {},
             input_size=size, report=report,
         )
         print(f"Fused checkpoint: {path}")
@@ -550,6 +551,8 @@ Documentation: https://github.com/FlashVision/FlashDet
                         help="Probe input size (default: from checkpoint config)")
     fuse_p.add_argument("--output", default=None,
                         help="Save the fused model as a replayable checkpoint")
+    fuse_p.add_argument("--half", action="store_true",
+                        help="Save the fused checkpoint in half precision")
     fuse_p.add_argument("--no-rep", action="store_true",
                         help="Skip structural reparameterization (rep blocks)")
     fuse_p.add_argument("--no-verify", dest="no_verify", action="store_true",

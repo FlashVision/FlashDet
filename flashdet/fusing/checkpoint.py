@@ -51,6 +51,11 @@ PASS_REGISTRY = (
     "linear_bn",
 )
 
+# Training-only branches; inference never evaluates them.
+_TRAINING_ONLY_PREFIXES = (
+    "aux_head.", "aux_heads.", "head.o2m_heads.", "o2m_heads.",
+)
+
 
 def passes_from_names(names: list[str], example_input=None) -> list:
     """Instantiate fusion passes from their saved names, in order."""
@@ -87,6 +92,7 @@ def save_fused_checkpoint(model: nn.Module, path: str, *, config: dict,
     state = {
         k.replace("_orig_mod.", "", 1): v
         for k, v in model.state_dict().items()
+        if not k.startswith(_TRAINING_ONLY_PREFIXES)
     }
     names = [p.get("name") for p in report.passes] if report is not None else []
     names = [n for n in names if n]

@@ -252,6 +252,9 @@ before you ship it. On a 3-epoch sample this means: FP32/FP16 ONNX matches
 PyTorch at max|Δ| ≈ 1e-4, and INT8 typically costs a few percent of box IoU
 (depending on how much calibration data you give it).
 
+For measured FP32 → FP16 → fused → INT8 numbers on one checkpoint, see
+[Optimization pipeline](#optimization-pipeline).
+
 Training writes these files:
 
 ```text
@@ -264,6 +267,109 @@ model_final_inference.pth
 results.json
 training_log.csv
 ```
+
+---
+
+## Optimization pipeline
+
+The optimization steps are independent but designed to stack. Each stage is
+checked against the previous one, so you can see exactly what it buys and what
+it costs:
+
+```text
+checkpoint.pth (FP32) ...................... 1.37 MB   mAP 0.601
+   │
+   ├─ flashdet fuse ........................ 1.21 MB   mAP 0.601
+   │     ├─ flashdet fuse --half ........... 0.63 MB   mAP 0.601
+   │     └─ flashdet export --simplify ..... 1.22 MB   mAP 0.601
+   │            └─ export --int8 --calib-images ...
+   │                                       .. 0.52 MB   mAP 0.589
+   │
+   └─ flashdet export --simplify ........... 1.28 MB   mAP 0.601
+```
+
+The first row is the PyTorch checkpoint; the right column is the on-disk size
+and validation accuracy of each artifact. Fusion and export are alternatives
+that compose: fusing first gives the smallest ONNX and INT8 files.
+
+Measured on the `p-demo-synth10` checkpoint (369K params, 10 classes, 128×128
+input) on a 16-thread CPU with PyTorch 2.13 and onnxruntime 1.21. Latency is
+the raw forward pass (decode/NMS excluded), median of 100 runs after 20
+warmups. The validation split is the 200-image synthetic set.
+
+| Stage | Params | File size | Latency | FPS | mAP@0.5 | Box IoU vs FP32 |
+|---|---:|---:|---:|---:|---:|---:|
+| FP32 PyTorch | 369,384 | 1.37 MB | 4.82 ms | 207 | 0.601 | 1.000 |
+| FP32 PyTorch, fused | 356,432 | 1.21 MB | 2.92 ms | 343 | 0.601 | 1.000 |
+| FP16 PyTorch | 369,384 | 0.72 MB | 36.1 ms* | 28 | 0.601 | 0.999 |
+| FP16 PyTorch, fused | 356,432 | 0.63 MB | 26.9 ms* | 37 | 0.601 | 0.999 |
+| FP32 ONNX | 369,384 | 1.28 MB | 0.99 ms | 1,015 | 0.601 | 1.000 |
+| FP32 ONNX, fused | 356,432 | 1.22 MB | 0.83 ms | 1,212 | 0.601 | 1.000 |
+| INT8 ONNX | 369,384 | 0.61 MB | 0.82 ms | 1,224 | 0.588 | 0.926 |
+| INT8 ONNX, fused | 356,432 | 0.52 MB | 0.65 ms | 1,547 | 0.589 | 0.912 |
+
+\* General-purpose CPUs do not accelerate FP16 arithmetic, so the FP16 latency
+is *worse* than FP32. Treat FP16 as a storage/GPU format; the file size is the
+point. On a GPU, FP16 also reduces memory traffic.
+
+End to end, the demo model goes from **4.82 ms / 1.37 MB / mAP 0.601** to
+**0.65 ms / 0.52 MB / mAP 0.589**: 7.4× faster, 2.6× smaller, and 1.2 points
+(2.0% relative) of mAP. Fusion alone makes eager PyTorch 1.65× faster; the
+ONNX export and INT8 quantization then remove most of the remaining runtime.
+
+Reproduce the table on any checkpoint:
+
+```bash
+flashdet weights --name p-demo-synth10
+python scripts/create_synthetic_dataset.py --output data/synth10
+python scripts/benchmark_pipeline.py \
+    --model weights/flashdet_p-demo-synth10.pth \
+    --val-images data/synth10/valid \
+    --input-size 128 \
+    --output workspace/pipeline/report.json
+```
+
+The script exports every artifact, measures each stage, and writes the table
+plus a JSON report (`--output`). The dataset generator is seeded, so the demo
+numbers are reproducible; your own checkpoint and validation split will give
+different absolute values but the same relative ordering.
+
+### What each stage changes
+
+| Step | What it does | Measured effect | What it costs |
+|---|---|---|---|
+| **FP16 weights** | Stores parameters as 2-byte floats | 1.37 → 0.72 MB (−47%) | No accuracy change; slower on CPU, so use it for GPU or as a download format |
+| **Layer + kernel fusion** | Folds BatchNorm into conv/Linear weights, collapses reparameterizable branches, turns `conv → BN → act` into one module call | PyTorch 4.82 → 2.92 ms (1.65×); 13K fewer params (−3.5%); 1.37 → 1.21 MB | None measurable (parity ≈ 3e-5); shared modules are skipped, so a few BN layers can remain |
+| **ONNX export + simplify** | Removes the Python dispatcher, folds constants and dead branches | PyTorch 4.82 → 0.99 ms (4.9×) | Adds onnxruntime as a runtime dependency |
+| **INT8 QDQ** | Statically calibrated 8-bit weights *and* activations | FP32 ONNX 0.99 → 0.82 ms; fused 0.83 → 0.65 ms; fused file 1.22 → 0.52 MB | mAP 0.601 → 0.589, box IoU 0.91–0.93; needs representative calibration images |
+
+A few things worth knowing when reading the table:
+
+- **Fusion matters more in eager PyTorch than in ONNX.** Folding BN removes a
+  kernel launch per block; ONNX Runtime and TensorRT already fuse some of that,
+  so the remaining gain there is smaller (0.99 → 0.83 ms).
+- **INT8 is where most of the size win is.** Quantizing the fused graph keeps
+  the folded weights and drops the redundant BN scales, which is why the fused
+  INT8 file is the smallest artifact (0.52 MB).
+- **mAP and box IoU answer different questions.** mAP tracks detection quality;
+  box IoU compares the boxes each stage produces against FP32 on the same
+  images. INT8 loses about 2% relative mAP while boxes stay at ~0.91 mean IoU.
+  Check both if your application reuses fixed confidence thresholds.
+- **Sizes are files on disk.** Inference checkpoints omit the auxiliary
+  training head, and ONNX stores folded constants instead of BN buffers, so
+  "params × 4 bytes" is only a rough guide.
+- **Fuse at export time, not before training.** Fusion rewrites module paths
+  (a fused triple becomes one module), so fused checkpoints are for inference
+  and benchmarking, not for resuming training.
+
+### Recommended combinations
+
+| Deployment | Artifact | Why |
+|---|---|---|
+| CUDA server, accuracy first | `flashdet fuse --half` (0.63 MB) | FP16 compute on GPU, fused convs, no quantization loss |
+| CPU server / edge | `flashdet export --int8` from the fused model | 0.52 MB, ~1.5k FPS on 16 threads, mAP within 2% of FP32 |
+| Portable runtime (no PyTorch) | `flashdet export --simplify` (FP32 ONNX) | Matches PyTorch at ≈1e-4, no calibration data needed |
+| Fine-tuning base | Original checkpoint | Training needs the unfused graph |
 
 ---
 
@@ -340,7 +446,7 @@ flashdet fuse --model best.pth --output fused.pth   # save a replayable checkpoi
 Fused checkpoints are ordinary state dicts (no pickled modules), so they load
 through the normal safe checkpoint path and work with `export`, `benchmark`,
 `val` and `predict`. On the demo checkpoint, fusion collapses 20
-reparameterizable blocks and 47 conv-BN-activation triples with max|Δ| ≈ 8e-5
+reparameterizable blocks and 47 conv-BN-activation triples with max|Δ| ≈ 3e-5
 against the unfused model.
 
 ---

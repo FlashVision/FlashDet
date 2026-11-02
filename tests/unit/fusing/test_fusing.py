@@ -313,7 +313,10 @@ def test_fused_checkpoint_roundtrip(tmp_path):
     reloaded = build_model_from_checkpoint(str(out_path))
     saved_state = payload["model_state_dict"]
     reloaded_state = reloaded.state_dict()
-    assert set(saved_state) == set(reloaded_state)
+    # Training-only heads are intentionally not saved.
+    assert set(saved_state) <= set(reloaded_state)
+    assert not any(k.startswith(("aux_head.", "aux_heads."))
+                   for k in saved_state)
     for key in saved_state:
         assert torch.equal(saved_state[key], reloaded_state[key]), key
 

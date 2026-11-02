@@ -9,7 +9,11 @@ All notable changes to FlashDet will be documented in this file.
   graph passes: structural reparameterization, conv-BN-activation triples
   collapsed into one module, BatchNorm folded into conv/Linear weights, and
   stacked Linear merging. `flashdet fuse` reports the change and verifies
-  numeric parity; fused models are saved as plain, replayable state dicts.
+  numeric parity; fused models are saved as plain, replayable state dicts
+  (inference-only, optionally FP16 via `flashdet fuse --half`).
+- `scripts/benchmark_pipeline.py` — measures the whole FP32 → FP16 → fused →
+  ONNX → INT8 pipeline on one checkpoint (params, file size, latency, FPS,
+  mAP@0.5, box IoU) and emits a markdown table plus JSON.
 - **Pico-Zoo backbones** — `FlashDet-P` now accepts all 40 architecture names from the Pico model table via `--backbone` / `backbone_type` (`repvit`, `mobileone`, `edgenext`, `mambaout`, `pp_lcnet`, `convnextv2`, ...).
 - **Pico-Zoo necks** — matching lightweight PAN neck families (`rep`, `ghost`, `attention`, `mamba`, `lcnet`) selected automatically or with `--neck`.
 - `scripts/train_pico_zoo.sh` for Pico backbone/neck experiments.
