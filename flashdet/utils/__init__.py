@@ -15,6 +15,7 @@ from .performance import (
     make_sgd,
     prepare_images,
     to_channels_last,
+    build_param_groups,
 )
 from .bbox import make_anchor_grid, decode_ltrb, bbox_iou_aligned, decode_batch_nms_free
 from .torchtune_optim import (
@@ -32,7 +33,7 @@ __all__ = [
     "safe_torch_load", "load_inference_model",
     "setup_logger", "AverageMeter",
     "configure_performance", "to_channels_last", "prepare_images",
-    "make_adamw", "make_sgd",
+    "make_adamw", "make_sgd", "build_param_groups",
     "make_anchor_grid", "decode_ltrb", "bbox_iou_aligned", "decode_batch_nms_free",
     "apply_activation_checkpointing", "ActivationOffloadHook",
     "create_optimizer", "compile_model", "log_memory_stats",

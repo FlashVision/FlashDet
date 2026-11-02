@@ -46,6 +46,26 @@ def prepare_images(images: torch.Tensor, device: torch.device,
     return images
 
 
+def build_param_groups(model: nn.Module, weight_decay: float) -> list[dict]:
+    """Split parameters into decay and no-decay groups.
+
+    Standard practice for AdamW-family optimizers: apply weight decay only to
+    weight-like tensors (ndim > 1). Biases and normalization parameters get
+    decay 0 — decaying them limits how well the model can refine in late
+    training and makes the loss level off earlier.
+    """
+    decay, no_decay = [], []
+    for param in model.parameters():
+        if not param.requires_grad:
+            continue
+        (no_decay if param.ndim <= 1 else decay).append(param)
+    groups = []
+    if decay:
+        groups.append({"params": decay, "weight_decay": weight_decay})
+    if no_decay:
+        groups.append({"params": no_decay, "weight_decay": 0.0})
+    return groups
+
 def make_adamw(params, lr: float, weight_decay: float, **kwargs):
     """AdamW with fused CUDA kernels when available, else foreach."""
     if kwargs.pop("fused", True) and torch.cuda.is_available():

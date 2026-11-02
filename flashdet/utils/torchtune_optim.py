@@ -16,6 +16,8 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
+from flashdet.utils.performance import build_param_groups
+
 logger = logging.getLogger(__name__)
 
 
@@ -159,7 +161,7 @@ def create_optimizer(
         try:
             import bitsandbytes as bnb
             opt = bnb.optim.AdamW8bit(
-                model.parameters(),
+                build_param_groups(model, weight_decay),
                 lr=lr,
                 weight_decay=weight_decay,
                 betas=betas,
@@ -173,7 +175,7 @@ def create_optimizer(
             )
 
     return torch.optim.AdamW(
-        model.parameters(),
+        build_param_groups(model, weight_decay),
         lr=lr,
         weight_decay=weight_decay,
         betas=betas,

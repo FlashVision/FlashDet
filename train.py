@@ -30,7 +30,7 @@ from flashdet.data import create_dataloader, verify_dataset, verify_training_dat
 from flashdet.utils import (
     save_checkpoint, load_checkpoint, save_inference_weights, setup_logger,
     AverageMeter, safe_torch_load, configure_performance, make_adamw,
-    make_sgd, prepare_images, to_channels_last,
+    make_sgd, prepare_images, to_channels_last, build_param_groups,
 )
 from flashdet.utils.metrics import compute_map
 from flashdet.utils.torchtune_optim import (
@@ -1091,7 +1091,7 @@ def main():
     if opt_type == "adamw" and not args.optimizer_in_bwd:
         logger.info(f"Optimizer: AdamW (lr={base_lr:.6f}, wd={wd})")
         optimizer = make_adamw(
-            raw_model.parameters(),
+            build_param_groups(raw_model, wd),
             lr=base_lr,
             betas=(0.9, 0.999),
             weight_decay=wd,
@@ -1107,7 +1107,7 @@ def main():
     elif opt_type == "sgd" and not args.optimizer_in_bwd:
         logger.info("Optimizer: SGD")
         optimizer = make_sgd(
-            raw_model.parameters(),
+            build_param_groups(raw_model, wd),
             lr=base_lr,
             momentum=0.9,
             weight_decay=wd,

@@ -35,3 +35,25 @@ class MyBackbone(nn.Module):
 | Semi-Supervised | `SemiSupervisedTrainer` | Limited labels |
 | Few-Shot | `FewShotTrainer` | Very few examples |
 | Active Learning | `ActiveLearningTrainer` | Annotation budget |
+
+## Why does the loss level off near the end of training?
+
+It happens in most training runs. Two things slow the final epochs down:
+
+1. **The learning rate is small.** The cosine schedule is near its floor at
+   epoch 90 of a 100-epoch run, so steps are tiny. This is expected — but you
+   can control the floor with `--lrf`:
+
+   ```bash
+   # End at 2% of the base LR instead of the default 10% for more final polish
+   python train.py --lrf 0.02 ...
+   ```
+
+2. **Weight decay on biases and norms.** Decaying normalization and bias
+   parameters sets a floor on how low the loss can go. FlashDet now excludes
+   them from decay automatically — this was previously applied to every
+   parameter.
+
+If the loss stops improving much earlier than the last few epochs (say by
+epoch 30 of 100), the LR floor is not the issue — check the dataset size,
+`--warmup-epochs`, and the loss weights instead.
