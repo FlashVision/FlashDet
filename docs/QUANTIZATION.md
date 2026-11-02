@@ -169,6 +169,20 @@ qat.prepare(layer_prefixes=("backbone", "neck"))
 qmodel = qat.convert()
 ```
 
+## Quick FlashDet check
+
+On the 5-epoch FlashDet-P synthetic checkpoint (200 validation images):
+
+| Model | mAP@0.5 |
+|---|---:|
+| Float | 0.2573 |
+| Static 8-bit (backbone + neck) | 0.2633 |
+| AWQ 4-bit, group 32 (backbone + neck) | 0.2116 |
+| GPTQ 8-bit (backbone + neck) | 0.2577 |
+
+This is a correctness check, not a production accuracy benchmark. Static and
+GPTQ 8-bit are effectively lossless here; AWQ 4-bit trades accuracy for size.
+
 ## Notes
 
 - `head` is kept float by default because classification/regression output

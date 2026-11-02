@@ -65,7 +65,7 @@ class DySample(nn.Module):
 
     def _sample(self, x: torch.Tensor, offset: torch.Tensor) -> torch.Tensor:
         B, _, H, W = offset.shape
-        offset = offset.view(B, 2, -1, H, W)
+        offset = offset.reshape(B, 2, -1, H, W)
         coords_h = torch.arange(H, dtype=x.dtype, device=x.device) + 0.5
         coords_w = torch.arange(W, dtype=x.dtype, device=x.device) + 0.5
         coords = (
@@ -77,8 +77,8 @@ class DySample(nn.Module):
         ).view(1, 2, 1, 1, 1)
         coords = 2 * (coords + offset) / normalizer - 1
         coords = (
-            F.pixel_shuffle(coords.view(B, -1, H, W), self.scale)
-            .view(B, 2, -1, self.scale * H, self.scale * W)
+            F.pixel_shuffle(coords.reshape(B, -1, H, W), self.scale)
+            .reshape(B, 2, -1, self.scale * H, self.scale * W)
             .permute(0, 2, 3, 4, 1).contiguous().flatten(0, 1)
         )
         return F.grid_sample(

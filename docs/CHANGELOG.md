@@ -57,6 +57,11 @@ All notable changes to FlashDet will be documented in this file.
   and early stopping is broadcast to all ranks.
 - **Checkpoints** — strip `torch.compile` prefixes and training-only heads from
   inference weights.
+- **CLI validation** — `flashdet val` now derives `_annotations.coco.json`,
+  prints mAP/per-class AP, and defaults to the same 0.01 score threshold used
+  during training validation.
+- **DySample robustness** — use `reshape` for non-contiguous tensors (fixes
+  quantized/hooked neck execution).
 - **Inference preprocessing mismatch (critical)** — `Predictor` used BGR,
   `/255`, top-left padding and scale-only box mapping. It now uses the same
   RGB + ImageNet mean/std + centred letterbox and inverse-warp box mapping as

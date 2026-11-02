@@ -1,6 +1,7 @@
 """FlashDet Validator — compute mAP metrics on a validation set."""
 
 import logging
+import os
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -38,7 +39,7 @@ class Validator:
         batch_size: int = 32,
         workers: int = 4,
         input_size: Optional[int] = None,
-        conf_thresh: float = 0.05,
+        conf_thresh: float = 0.01,
         nms_thresh: float = 0.6,
         iou_threshold: float = 0.5,
         val_images: Optional[str] = None,
@@ -56,6 +57,10 @@ class Validator:
         cfg = get_config()
         self.val_images = val_images or cfg.data.val_images
         self.val_annotations = val_annotations or cfg.data.val_annotations
+        if not self.val_annotations and self.val_images:
+            candidate = os.path.join(self.val_images, "_annotations.coco.json")
+            if os.path.isfile(candidate):
+                self.val_annotations = candidate
 
         if model is not None:
             self.model = model.to(self.device)

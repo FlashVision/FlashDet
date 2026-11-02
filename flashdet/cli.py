@@ -268,7 +268,14 @@ def cmd_val(args):
         input_size=args.input_size,
         batch_size=args.batch_size,
     )
-    validator.validate()
+    results = validator.validate()
+    print(f"mAP@{validator.iou_threshold:.2f}: {results['mAP']:.4f}")
+    print(f"Validation loss: {results['val_loss']:.4f}")
+    if results.get("AP_per_class"):
+        print("Per-class AP:")
+        for cid, ap in sorted(results["AP_per_class"].items()):
+            name = validator.class_names[cid] if cid < len(validator.class_names) else str(cid)
+            print(f"  {name}: {ap:.4f}")
 
 
 def cmd_export(args):
@@ -431,7 +438,7 @@ Documentation: https://github.com/FlashVision/FlashDet
     val_p.add_argument("--model", required=True, help="Path to .pth checkpoint")
     val_p.add_argument("--val-images", required=True, help="Path to validation images")
     val_p.add_argument("--device", default="cuda", help="Device (default: cuda)")
-    val_p.add_argument("--conf", type=float, default=0.05, help="Confidence threshold (default: 0.05)")
+    val_p.add_argument("--conf", type=float, default=0.01, help="Confidence threshold (default: 0.01, matches training validation)")
     val_p.add_argument("--nms", type=float, default=0.6, help="NMS IoU threshold (default: 0.6)")
     val_p.add_argument("--input-size", type=int, default=None,
                        help="Input size (default: from checkpoint/config)")

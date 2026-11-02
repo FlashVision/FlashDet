@@ -1,6 +1,7 @@
 """Validator must rebuild the architecture recorded in the checkpoint."""
 
 from flashdet.engine.evaluation.validator import Validator
+from flashdet.models.architectures.flashdet import FlashDet
 from flashdet.models.architectures.yolov8 import YOLOv8
 from flashdet.utils.checkpoint import save_inference_weights
 
@@ -25,3 +26,12 @@ def test_validator_rebuilds_yolo_checkpoint(tmp_path):
     validator = Validator(model_path=str(path), device="cpu")
     assert type(validator.model).__name__ == "YOLOv8"
     assert len(validator.class_names) == 2
+
+
+def test_validator_derives_annotation_file(tmp_dataset_dir):
+    validator = Validator(
+        model=FlashDet(num_classes=3, size="n"),
+        val_images=f"{tmp_dataset_dir}/valid",
+        device="cpu",
+    )
+    assert validator.val_annotations.endswith("_annotations.coco.json")
