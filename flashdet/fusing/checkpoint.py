@@ -89,6 +89,15 @@ def save_fused_checkpoint(model: nn.Module, path: str, *, config: dict,
         for k, v in model.state_dict().items()
     }
     names = [p.get("name") for p in report.passes] if report is not None else []
+    names = [n for n in names if n]
+    unknown = [n for n in names if n not in PASS_REGISTRY]
+    if unknown:
+        # The manifest is replayed on load; unknown names would make the
+        # checkpoint unloadable, so fail loudly at save time instead.
+        raise ValueError(
+            f"cannot save fused checkpoint with unknown pass(es): {unknown}; "
+            f"known passes are {list(PASS_REGISTRY)}"
+        )
     payload = {
         "model_state_dict": state,
         "config": dict(config or {}),

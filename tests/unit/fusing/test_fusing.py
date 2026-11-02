@@ -240,6 +240,18 @@ def test_rep_fusion_on_reparameterizable_block():
 # ---------------------------------------------------------------------------
 
 
+def test_save_rejects_unknown_pass(tmp_path):
+    from flashdet.fusing.base import FusionReport
+    from flashdet.fusing.checkpoint import save_fused_checkpoint
+
+    report = FusionReport(passes=[{"name": "not_a_pass", "fused": 1}])
+    with pytest.raises(ValueError, match="unknown pass"):
+        save_fused_checkpoint(
+            nn.Linear(2, 2), str(tmp_path / "bad.pth"),
+            config={}, input_size=32, report=report,
+        )
+
+
 def test_fused_checkpoint_roundtrip(tmp_path):
     from flashdet.deployment.onnx_export import build_model_from_checkpoint
     from flashdet.fusing.checkpoint import save_fused_checkpoint

@@ -22,8 +22,6 @@ from flashdet.fusing.graph_fusing.fx_utils import (
 from flashdet.fusing.layer_fusing.conv_bn import fold_bn_into_conv
 
 _ACT_MODULE_TYPES = (nn.ReLU, nn.LeakyReLU, nn.SiLU, nn.Identity)
-_ACT_FUNCTIONAL = (torch.nn.functional.relu, torch.nn.functional.leaky_relu,
-                   torch.nn.functional.silu)
 
 
 class FusedConvBnAct(nn.Module):
