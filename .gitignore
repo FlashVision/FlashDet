@@ -100,6 +100,8 @@ lightning_logs/
 *.ico
 *.svg
 !assets/logo.png
+# Documentation figures referenced by the README
+!docs/images/*.png
 
 # ═══════════════════════════════════════════════════════════════
 # Media & archives
