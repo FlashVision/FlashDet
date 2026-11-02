@@ -43,7 +43,7 @@ class ModelConfig:
     backbone_size: str = "1.0x"
     backbone_pretrained: bool = True
 
-    # Pico backbone/neck selectors (see docs/Pico-Zoo.md)
+    # Pico backbone/neck selectors
     backbone_type: str = "lite"
     neck_type: Optional[str] = None
     pico_stem_channels: Optional[int] = None

@@ -7,20 +7,19 @@ All notable changes to FlashDet will be documented in this file.
 ### Added
 - **Pico-Zoo backbones** — `FlashDet-P` now accepts all 40 architecture names from the Pico model table via `--backbone` / `backbone_type` (`repvit`, `mobileone`, `edgenext`, `mambaout`, `pp_lcnet`, `convnextv2`, ...).
 - **Pico-Zoo necks** — matching lightweight PAN neck families (`rep`, `ghost`, `attention`, `mamba`, `lcnet`) selected automatically or with `--neck`.
-- `scripts/train_pico_zoo.sh` and `docs/Pico-Zoo.md`.
+- `scripts/train_pico_zoo.sh` for Pico backbone/neck experiments.
 - **Quantization toolkit** — `flashdet/quantization/` with static (MinMax,
   percentile, histogram/MSE, SmoothQuant), AWQ, GPTQ, dynamic/weight-only
   INT8, QAT (fake quant, LSQ, PACT) and `QuantFlashDet` layer-aware policies.
 - `flashdet.data.demo.create_demo_dataset()` + `scripts/create_demo_dataset.py`
   so examples work from a clean checkout (the old `data/demo` had annotations
   but no images).
-- Archived the old `currDATA/` training logs under `docs/training-logs/`.
-- `scripts/create_synthetic_dataset.py` and `docs/TRAINING-MATRIX.md` — reproducible
-  1,000-image / 10-class training matrix for every model size.
+- `scripts/create_synthetic_dataset.py` — reproducible synthetic dataset for
+  training and smoke checks.
 - Repository-level GitHub Copilot instructions and `copilot-setup-steps` workflow.
 - **Automatic PyPI publishing** — after CI on `main`, the publish workflow
   checks the version and uploads new releases via PyPI trusted publishing or an
-  API token. See `docs/PUBLISHING.md`.
+  API token.
 
 ### Changed
 - **Config-driven defaults** — Pico stem/depths/neck width, FPN strides, LR scaling
