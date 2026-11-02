@@ -370,6 +370,10 @@ See **[docs/LoRA-Fine-Tuning.md](docs/LoRA-Fine-Tuning.md)**.
 
 ## Inference
 
+> Inference uses the same RGB + ImageNet mean/std + centred letterbox pipeline
+> as validation. Do not add a separate `/255` normalization when using the
+> built-in `Predictor`.
+
 ### Python
 
 ```python

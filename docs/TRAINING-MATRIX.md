@@ -57,7 +57,28 @@ passed a 0-based epoch. The ProgLoss schedule is 0-based.
 The same fix was applied to `Trainer` in the engine. Training and validation
 now report the same alpha at every epoch.
 
-### 2. Validation loss depended on batch size
+### 2. Predictor preprocessing did not match validation (critical accuracy bug)
+
+**Symptom:** the same trained checkpoint scored **0.0425 mAP** through
+`flashdet predict` / the Python `Predictor`, but **0.8573 mAP** through the
+validation pipeline.
+
+**Cause:** `Predictor` used a different inference pipeline:
+
+- BGR instead of RGB
+- `/255` normalization instead of ImageNet mean/std
+- top-left padding instead of centred letterbox
+- boxes divided by `scale` instead of inverse-mapping the warp matrix
+
+**Fix:** `Predictor` now uses the same `InferenceTransform` as validation:
+RGB, ImageNet mean/std, centred letterbox, and inverse warp for box mapping.
+The fix affects `flashdet predict`, the Python API, solutions and trackers.
+`test.py` already used the correct transform.
+
+Regression tests compare `Predictor.preprocess()` against
+`InferenceTransform` and verify centred-letterbox box remapping.
+
+### 3. Validation loss depended on batch size
 
 **Symptom:** validation loss was ~16× larger than the per-sample loss shown in
 the training sub-metrics (batch size was 16).

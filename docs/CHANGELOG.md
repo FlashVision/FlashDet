@@ -32,6 +32,11 @@ All notable changes to FlashDet will be documented in this file.
   three-entry hardcoded mapping.
 
 ### Fixed
+- **Inference preprocessing mismatch (critical)** — `Predictor` used BGR,
+  `/255`, top-left padding and scale-only box mapping. It now uses the same
+  RGB + ImageNet mean/std + centred letterbox and inverse-warp box mapping as
+  validation. On the training-matrix checkpoint this raised measured mAP from
+  0.0425 to 0.8573.
 - **ProgLoss epoch alignment** — training used a 1-based epoch while validation
   used 0-based, so the two passes applied different ProgLoss weights. Both now
   use the same 0-based schedule.

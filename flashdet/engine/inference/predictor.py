@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 import torch
 
+from flashdet.data.transforms import InferenceTransform
 from flashdet.models.detector import build_model
 from flashdet.utils.checkpoint import safe_torch_load
 
@@ -54,6 +55,12 @@ class Predictor:
             self.model, self.num_classes = self._load_model(model_path)
         else:
             raise ValueError("Must provide either model_path or model")
+
+        # Must match the training/validation preprocessing exactly:
+        # RGB, ImageNet mean/std, centred letterbox.
+        self.transform = InferenceTransform(
+            input_size=(self.input_size, self.input_size)
+        )
 
     def _load_model(self, model_path: str):
         """Load model from checkpoint."""
@@ -114,8 +121,8 @@ class Predictor:
     # is fixed-size, so a gigantic source image only wastes memory/CPU.
     MAX_INPUT_PIXELS = 64_000_000  # ~8000 x 8000
 
-    def preprocess(self, image: np.ndarray) -> Tuple[torch.Tensor, float, Tuple[int, int]]:
-        """Validate, resize and normalize an image for inference."""
+    def preprocess(self, image: np.ndarray) -> Tuple[torch.Tensor, Dict]:
+        """Validate, letterbox, normalize and return a batch tensor + meta."""
         if not isinstance(image, np.ndarray):
             raise TypeError(
                 f"Expected a numpy image array, got {type(image).__name__}"
@@ -139,16 +146,31 @@ class Predictor:
         if image.dtype != np.uint8:
             image = np.clip(image, 0, 255).astype(np.uint8)
 
-        scale = min(self.input_size / h, self.input_size / w)
-        new_h, new_w = max(1, int(h * scale)), max(1, int(w * scale))
-        resized = cv2.resize(image, (new_w, new_h))
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        tensor, meta = self.transform(rgb)
+        tensor = torch.from_numpy(tensor).unsqueeze(0).to(self.device)
+        return tensor, meta
 
-        padded = np.full((self.input_size, self.input_size, 3), 114, dtype=np.uint8)
-        padded[:new_h, :new_w] = resized
-
-        tensor = torch.from_numpy(padded).permute(2, 0, 1).float() / 255.0
-        tensor = tensor.unsqueeze(0).to(self.device)
-        return tensor, scale, (h, w)
+    @staticmethod
+    def _boxes_to_original(boxes: np.ndarray, meta: Dict) -> np.ndarray:
+        """Map letterboxed input-space boxes back to original image pixels."""
+        if len(boxes) == 0:
+            return boxes
+        inv_warp = np.linalg.inv(meta["warp_matrix"])
+        n = len(boxes)
+        xy = np.ones((n * 4, 3), dtype=np.float64)
+        xy[:, :2] = boxes[:, [0, 1, 2, 3, 0, 3, 2, 1]].reshape(n * 4, 2)
+        xy = xy @ inv_warp.T
+        xy = (xy[:, :2] / xy[:, 2:3]).reshape(n, 8)
+        xs = xy[:, [0, 2, 4, 6]]
+        ys = xy[:, [1, 3, 5, 7]]
+        orig_w, orig_h = meta["original_size"]
+        return np.stack([
+            np.clip(xs.min(1), 0, orig_w - 1),
+            np.clip(ys.min(1), 0, orig_h - 1),
+            np.clip(xs.max(1), 0, orig_w - 1),
+            np.clip(ys.max(1), 0, orig_h - 1),
+        ], axis=1).astype(np.float32)
 
     @torch.no_grad()
     def __call__(self, source) -> List[Tuple[np.ndarray, float, int]]:
@@ -164,7 +186,7 @@ class Predictor:
         else:
             image = source
 
-        tensor, scale, (orig_h, orig_w) = self.preprocess(image)
+        tensor, meta = self.preprocess(image)
 
         if hasattr(self.model, "predict"):
             results = self.model.predict(
@@ -174,7 +196,7 @@ class Predictor:
                 dets, labels = results[0]
                 if dets.numel() == 0:
                     return []
-                boxes = dets[:, :4].cpu().numpy() / scale
+                boxes = self._boxes_to_original(dets[:, :4].cpu().numpy(), meta)
                 scores = dets[:, 4].cpu().numpy()
                 class_ids = labels.cpu().numpy()
                 return [(boxes[i], float(scores[i]), int(class_ids[i]))
@@ -191,7 +213,7 @@ class Predictor:
                 dets, labels = results[0]
                 if dets.numel() == 0:
                     return []
-                boxes = dets[:, :4].cpu().numpy() / scale
+                boxes = self._boxes_to_original(dets[:, :4].cpu().numpy(), meta)
                 scores = dets[:, 4].cpu().numpy()
                 class_ids = labels.cpu().numpy()
                 return [(boxes[i], float(scores[i]), int(class_ids[i]))

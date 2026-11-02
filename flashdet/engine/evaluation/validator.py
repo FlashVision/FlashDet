@@ -132,9 +132,15 @@ class Validator:
 
             try:
                 out = self.model(images, gt_meta, epoch=0, compute_loss=True)
-                loss_meter.update(out["loss"].item())
-            except Exception:
-                pass
+                loss_states = out.get("loss_states", {})
+                meter_loss = loss_states.get("loss_total", out.get("loss"))
+                if meter_loss is not None:
+                    loss_meter.update(
+                        meter_loss.item()
+                        if hasattr(meter_loss, "item") else float(meter_loss)
+                    )
+            except Exception as exc:
+                logger.warning("Validation loss failed: %s", exc)
 
             results = self.model.predict(
                 images, None,
