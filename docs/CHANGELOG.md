@@ -41,6 +41,9 @@ All notable changes to FlashDet will be documented in this file.
   `config.train.multi_scale` (previously parsed but never enabled).
 - **Few-shot model size** — uses `resolve_flashdet_size()` instead of a
   three-entry hardcoded mapping.
+- **ONNX export dependencies** — the `[export]` extra (and `[dev]`) now
+  include `onnxscript`, which torch's dynamo ONNX exporter imports at runtime;
+  a missing install now raises a message naming the extra.
 
 ### Fixed
 - **mAP matching** — duplicate detections could steal a second, unmatched GT;
