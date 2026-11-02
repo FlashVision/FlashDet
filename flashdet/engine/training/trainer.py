@@ -680,7 +680,7 @@ class Trainer:
                         getattr(self, "_grad_clip_norm", 10.0),
                     )
                     optimizer.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
 
                 if ema is not None:
                     ema.update(raw_model)
