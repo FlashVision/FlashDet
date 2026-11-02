@@ -15,8 +15,9 @@ import torch.nn as nn
 from flashdet.fusing.graph_fusing.fx_utils import (
     EditContext,
     call_module_counts,
-    call_target_counts,
+    module_call_sites,
     trace_inference,
+    used_once,
 )
 
 _ACT_TYPES = (
@@ -76,7 +77,7 @@ class LinearPairFusionPass:
 
     def _merge_pairs(self, gm, edits: EditContext) -> int:
         count = 0
-        targets = call_target_counts(gm)
+        sites = module_call_sites(gm)
         for node in list(gm.graph.nodes):
             if node.op != "call_module":
                 continue
@@ -89,8 +90,7 @@ class LinearPairFusionPass:
             first = gm.get_submodule(first_node.target)
             if not isinstance(first, nn.Linear):
                 continue
-            if (targets[first_node.target] != 1
-                    or targets[node.target] != 1):
+            if not used_once(sites, first) or not used_once(sites, second):
                 continue
             merged = merge_linears(first, second)
             edits.replace(first_node.target, merged)

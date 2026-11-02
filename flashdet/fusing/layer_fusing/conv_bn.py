@@ -21,8 +21,9 @@ import torch.nn as nn
 from flashdet.fusing.graph_fusing.fx_utils import (
     EditContext,
     call_module_counts,
-    call_target_counts,
+    module_call_sites,
     trace_inference,
+    used_once,
 )
 
 _CONV_TYPES = (nn.Conv1d, nn.Conv2d, nn.Conv3d)
@@ -95,7 +96,7 @@ class ConvBnFusionPass:
 
     def _fold_pairs(self, gm, edits: EditContext) -> int:
         count = 0
-        targets = call_target_counts(gm)
+        sites = module_call_sites(gm)
         for node in list(gm.graph.nodes):
             if node.op != "call_module":
                 continue
@@ -108,7 +109,7 @@ class ConvBnFusionPass:
             conv = gm.get_submodule(conv_node.target)
             if not isinstance(conv, _CONV_TYPES):
                 continue
-            if targets[conv_node.target] != 1 or targets[node.target] != 1:
+            if not used_once(sites, conv) or not used_once(sites, bn):
                 # The module is shared by several call sites in the forward
                 # (e.g. one `self.act` applied in two branches).  Folding
                 # mutates the module and the graph together, so every call
@@ -148,7 +149,7 @@ class LinearBnFusionPass:
 
     def _fold_pairs(self, gm, edits: EditContext) -> int:
         count = 0
-        targets = call_target_counts(gm)
+        sites = module_call_sites(gm)
         for node in list(gm.graph.nodes):
             if node.op != "call_module":
                 continue
@@ -161,8 +162,7 @@ class LinearBnFusionPass:
             linear = gm.get_submodule(linear_node.target)
             if not isinstance(linear, nn.Linear):
                 continue
-            if (targets[linear_node.target] != 1
-                    or targets[node.target] != 1):
+            if not used_once(sites, linear) or not used_once(sites, bn):
                 continue
             extra_consumers = [u for u in linear_node.users if u is not node]
             if extra_consumers:

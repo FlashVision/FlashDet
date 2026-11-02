@@ -101,13 +101,24 @@ class EditContext:
         setattr(parent, attr, module)
 
 
-def call_target_counts(gm) -> dict:
-    """Map call_module target path -> number of call sites in ``gm``."""
-    counts: dict[str, int] = {}
+def module_call_sites(gm) -> dict:
+    """Map module object identity -> number of call sites in ``gm``.
+
+    Counting by identity (not by attribute path) also catches one module
+    registered under several names, e.g. ``self.act2 = self.act``.
+    """
+    counts: dict[int, int] = {}
     for node in gm.graph.nodes:
-        if node.op == "call_module":
-            counts[node.target] = counts.get(node.target, 0) + 1
+        if node.op != "call_module":
+            continue
+        key = id(gm.get_submodule(node.target))
+        counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def used_once(sites: dict, module) -> bool:
+    """True when ``module`` is called from exactly one place in the graph."""
+    return sites.get(id(module), 0) == 1
 
 
 def call_module_counts(gm) -> dict:

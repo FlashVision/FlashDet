@@ -16,8 +16,9 @@ import torch.nn as nn
 from flashdet.fusing.graph_fusing.fx_utils import (
     EditContext,
     call_module_counts,
-    call_target_counts,
+    module_call_sites,
     trace_inference,
+    used_once,
 )
 from flashdet.fusing.layer_fusing.conv_bn import fold_bn_into_conv
 
@@ -72,7 +73,7 @@ class ConvBnActFusionPass:
 
     def _fold_triples(self, gm, edits: EditContext) -> int:
         count = 0
-        targets = call_target_counts(gm)
+        sites = module_call_sites(gm)
         for node in list(gm.graph.nodes):
             if node.op != "call_module":
                 continue
@@ -86,8 +87,7 @@ class ConvBnActFusionPass:
             conv = gm.get_submodule(conv_node.target)
             if not isinstance(conv, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
                 continue
-            if (targets[conv_node.target] != 1
-                    or targets[node.target] != 1):
+            if not used_once(sites, conv) or not used_once(sites, bn):
                 # Module reused at several call sites (e.g. one `self.act`
                 # applied in two branches) — replacing the attribute would
                 # also rewrite the other call sites.
@@ -106,7 +106,7 @@ class ConvBnActFusionPass:
                 # The activation can only be absorbed when its module is
                 # not shared with another call site: absorbing it replaces
                 # the attribute with Identity everywhere.
-                if entry is not None and targets[bn_users[0].target] == 1:
+                if entry is not None and used_once(sites, entry[0]):
                     act_node = bn_users[0]
                     act_module = entry[0]
 

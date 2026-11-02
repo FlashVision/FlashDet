@@ -158,6 +158,33 @@ def test_shared_activation_is_not_corrupted():
     assert not any(isinstance(m, FusedConvBnAct) for m in fused.modules())
 
 
+def test_aliased_module_is_not_corrupted():
+    """One activation object registered under two names counts as shared."""
+
+    class _AliasedAct(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv = nn.Conv2d(3, 8, 3, padding=1, bias=False)
+            self.bn = nn.BatchNorm2d(8)
+            self.act = nn.LeakyReLU(0.1, inplace=True)
+            self.act2 = self.act  # alias: same module, second path
+
+        def forward(self, x):
+            z = self.act(self.bn(self.conv(x)))  # triple candidate
+            return z + self.act2(z)              # same object, second path
+
+    model = _AliasedAct()
+    x = torch.randn(2, 3, 16, 16)
+    fused, report = run_fusions(
+        model, [ConvBnActFusionPass(example_input=x)], example_input=x)
+
+    assert report.parity_ok, report.parity_max_abs_diff
+    assert isinstance(fused.act, nn.LeakyReLU)
+    assert fused.act2 is fused.act
+    assert not any(isinstance(m, FusedConvBnAct) for m in fused.modules())
+    assert module_op_counts(fused).get("batchnorm", 0) == 0
+
+
 def test_linear_passes_merge_stacked_linears():
     class Head(nn.Module):
         def __init__(self):
