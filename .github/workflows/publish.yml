@@ -1,28 +1,124 @@
 name: Publish to PyPI
 
+# Publish after a successful CI run on main, or manually.
+# The version is read from pyproject.toml. If that exact version already exists
+# on PyPI, publishing is skipped, so ordinary commits are safe.
 on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
   release:
     types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: pypi-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
-  publish:
+  check-version:
+    # Only publish successful main CI runs, releases, or manual dispatches.
+    if: >
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      should_publish: ${{ steps.check.outputs.should_publish }}
+      reason: ${{ steps.check.outputs.reason }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.event.release.tag_name || github.ref }}
+
+      - name: Read package version and check PyPI
+        id: check
+        env:
+          PACKAGE: flashdet
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import tomllib
+          import urllib.error
+          import urllib.request
+
+          with open("pyproject.toml", "rb") as f:
+              version = tomllib.load(f)["project"]["version"]
+          package = os.environ["PACKAGE"]
+          url = f"https://pypi.org/pypi/{package}/{version}/json"
+
+          exists = False
+          try:
+              with urllib.request.urlopen(url, timeout=10) as response:
+                  exists = response.status == 200
+          except urllib.error.HTTPError as exc:
+              exists = exc.code != 404
+          except Exception as exc:
+              # If PyPI cannot be reached, let the publish step surface the error.
+              print(f"PyPI version check failed: {exc}")
+
+          should_publish = "false" if exists else "true"
+          reason = (
+              f"{package} {version} already exists on PyPI"
+              if exists else f"{package} {version} is new"
+          )
+          print(reason)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"version={version}\n")
+              out.write(f"should_publish={should_publish}\n")
+              out.write(f"reason={reason}\n")
+          PY
+
+  publish:
+    needs: check-version
+    # Automatic publish is opt-in so a new workflow cannot fail before the
+    # PyPI trusted publisher or token is configured.
+    if: >
+      needs.check-version.outputs.should_publish == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event_name == 'release' ||
+       vars.PYPI_AUTO_PUBLISH == 'true')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.event.release.tag_name || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install build tools
-        run: pip install build twine
+      - name: Build distribution
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+          python -m build
+          twine check dist/*
 
-      - name: Build package
-        run: python -m build
-
-      - name: Publish to PyPI
+      - name: Publish with API token (if configured)
+        if: ${{ env.PYPI_API_TOKEN != '' }}
         env:
           TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          TWINE_PASSWORD: ${{ env.PYPI_API_TOKEN }}
         run: twine upload dist/*
+
+      - name: Publish with PyPI trusted publishing
+        if: ${{ env.PYPI_API_TOKEN == '' }}
+        uses: pypa/gh-action-pypi-publish@release/v1

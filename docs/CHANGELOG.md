@@ -15,6 +15,9 @@ All notable changes to FlashDet will be documented in this file.
 - `scripts/create_synthetic_dataset.py` and `docs/TRAINING-MATRIX.md` — reproducible
   1,000-image / 10-class training matrix for every model size.
 - Repository-level GitHub Copilot instructions and `copilot-setup-steps` workflow.
+- **Automatic PyPI publishing** — after CI on `main`, the publish workflow
+  checks the version and uploads new releases via PyPI trusted publishing or an
+  API token. See `docs/PUBLISHING.md`.
 
 ### Changed
 - **Config-driven defaults** — Pico stem/depths/neck width, FPN strides, LR scaling

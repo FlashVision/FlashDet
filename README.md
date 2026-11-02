@@ -611,7 +611,24 @@ FlashDet/
 | [Training Matrix](docs/TRAINING-MATRIX.md) | 1,000-image / 10-class run across all model sizes |
 | [Hardcoding Audit](docs/HARDCODING-AUDIT.md) | Configuration cleanup notes |
 | [FAQ](docs/FAQ.md) | Common questions |
+| [Publishing](docs/PUBLISHING.md) | Auto-publish GitHub → PyPI |
 | [Changelog](docs/CHANGELOG.md) | Version history |
+
+---
+
+## Releasing
+
+PyPI publishing is automatic after CI passes:
+
+1. Bump `project.version` in `pyproject.toml`.
+2. Bump the fallback `__version__` in `flashdet/__init__.py`.
+3. Update `docs/CHANGELOG.md`.
+4. Push to `main`.
+
+The publish workflow checks whether that version already exists on PyPI. If it
+is new, it builds and uploads it; otherwise it skips. See
+**[docs/PUBLISHING.md](docs/PUBLISHING.md)** for the one-time PyPI trusted
+publisher setup.
 
 ---
 
