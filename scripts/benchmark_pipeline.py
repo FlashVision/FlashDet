@@ -166,6 +166,30 @@ def _file_mb(path: str) -> float:
     return os.path.getsize(path) / (1024 ** 2)
 
 
+def _ensure_fp32(model_path: str, workdir: str) -> tuple[str, dict]:
+    """Upcast a half-precision checkpoint so the baseline row is truly FP32."""
+    payload = safe_torch_load(model_path, map_location="cpu")
+    state = payload.get("model_state_dict") if isinstance(payload, dict) else None
+    if not isinstance(state, dict):
+        return model_path, payload if isinstance(payload, dict) else {}
+    is_half = any(
+        torch.is_tensor(value) and value.dtype == torch.float16
+        for value in state.values()
+    )
+    if not is_half:
+        return model_path, payload
+    payload = dict(payload)
+    payload["model_state_dict"] = {
+        name: value.float()
+        if torch.is_tensor(value) and value.dtype == torch.float16 else value
+        for name, value in state.items()
+    }
+    payload["half"] = False
+    fp32_path = os.path.join(workdir, "model_fp32.pth")
+    torch.save(payload, fp32_path)
+    return fp32_path, payload
+
+
 def _save_fp16(checkpoint_path: str, output_path: str) -> str:
     """Write a half-precision copy of a state-dict checkpoint."""
     payload = safe_torch_load(checkpoint_path, map_location="cpu")
@@ -195,8 +219,12 @@ def run(args) -> dict:
     size = args.input_size or input_size_from_checkpoint(args.model)
     conf = args.conf
 
-    raw_ckpt = safe_torch_load(args.model, map_location="cpu")
-    config = raw_ckpt.get("config", {}) if isinstance(raw_ckpt, dict) else {}
+    # A released checkpoint may already be FP16; normalize the baseline so the
+    # "fp32" row really is FP32 (and the FP16 row is an honest comparison).
+    source_model = args.model
+    fp32_path, raw_ckpt = _ensure_fp32(args.model, args.workdir)
+    args.model = fp32_path
+    config = raw_ckpt.get("config", {})
 
     # --- fused checkpoint -------------------------------------------------
     base_model = build_model_from_checkpoint(args.model, fuse=False)
@@ -330,7 +358,7 @@ def run(args) -> dict:
         add(name, label, path, model, predict, dets, x, map_value)
 
     return {
-        "model": args.model,
+        "model": source_model,
         "input_size": size,
         "conf": conf,
         "fusion": report.to_dict(),

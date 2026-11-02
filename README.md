@@ -299,22 +299,22 @@ warmups. The validation split is the 200-image synthetic set.
 
 | Stage | Params | File size | Latency | FPS | mAP@0.5 | Box IoU vs FP32 |
 |---|---:|---:|---:|---:|---:|---:|
-| FP32 PyTorch | 369,384 | 1.37 MB | 4.82 ms | 207 | 0.601 | 1.000 |
-| FP32 PyTorch, fused | 356,432 | 1.21 MB | 2.92 ms | 343 | 0.601 | 1.000 |
-| FP16 PyTorch | 369,384 | 0.72 MB | 36.1 ms* | 28 | 0.601 | 0.999 |
-| FP16 PyTorch, fused | 356,432 | 0.63 MB | 26.9 ms* | 37 | 0.601 | 0.999 |
-| FP32 ONNX | 369,384 | 1.28 MB | 0.99 ms | 1,015 | 0.601 | 1.000 |
-| FP32 ONNX, fused | 356,432 | 1.22 MB | 0.83 ms | 1,212 | 0.601 | 1.000 |
-| INT8 ONNX | 369,384 | 0.61 MB | 0.82 ms | 1,224 | 0.588 | 0.926 |
-| INT8 ONNX, fused | 356,432 | 0.52 MB | 0.65 ms | 1,547 | 0.589 | 0.912 |
+| FP32 PyTorch | 369,384 | 1.37 MB | 4.80 ms | 208 | 0.601 | 1.000 |
+| FP32 PyTorch, fused | 356,432 | 1.21 MB | 2.98 ms | 335 | 0.601 | 1.000 |
+| FP16 PyTorch | 369,384 | 0.72 MB | 35.9 ms* | 28 | 0.601 | 0.999 |
+| FP16 PyTorch, fused | 356,432 | 0.63 MB | 26.8 ms* | 37 | 0.601 | 0.999 |
+| FP32 ONNX | 369,384 | 1.28 MB | 1.10 ms | 906 | 0.601 | 1.000 |
+| FP32 ONNX, fused | 356,432 | 1.22 MB | 0.81 ms | 1,231 | 0.601 | 1.000 |
+| INT8 ONNX | 369,384 | 0.61 MB | 0.83 ms | 1,210 | 0.594 | 0.900 |
+| INT8 ONNX, fused | 356,432 | 0.52 MB | 0.64 ms | 1,551 | 0.589 | 0.921 |
 
 \* General-purpose CPUs do not accelerate FP16 arithmetic, so the FP16 latency
 is *worse* than FP32. Treat FP16 as a storage/GPU format; the file size is the
 point. On a GPU, FP16 also reduces memory traffic.
 
-End to end, the demo model goes from **4.82 ms / 1.37 MB / mAP 0.601** to
-**0.65 ms / 0.52 MB / mAP 0.589**: 7.4× faster, 2.6× smaller, and 1.2 points
-(2.0% relative) of mAP. Fusion alone makes eager PyTorch 1.65× faster; the
+End to end, the demo model goes from **4.80 ms / 1.37 MB / mAP 0.601** to
+**0.64 ms / 0.52 MB / mAP 0.589**: 7.5× faster, 2.6× smaller, and 1.2 points
+(2.0% relative) of mAP. Fusion alone makes eager PyTorch 1.6× faster; the
 ONNX export and INT8 quantization then remove most of the remaining runtime.
 
 Reproduce the table on any checkpoint:
@@ -329,25 +329,27 @@ python scripts/benchmark_pipeline.py \
     --output workspace/pipeline/report.json
 ```
 
-The script exports every artifact, measures each stage, and writes the table
-plus a JSON report (`--output`). The dataset generator is seeded, so the demo
-numbers are reproducible; your own checkpoint and validation split will give
-different absolute values but the same relative ordering.
+The released demo checkpoint is FP16, so the script upcasts it before
+measuring the FP32 baseline. It exports every artifact, measures each stage,
+and writes the table plus a JSON report (`--output`). The dataset generator is
+seeded, so the demo numbers are reproducible; your own checkpoint and
+validation split will give different absolute values but the same relative
+ordering.
 
 ### What each stage changes
 
 | Step | What it does | Measured effect | What it costs |
 |---|---|---|---|
 | **FP16 weights** | Stores parameters as 2-byte floats | 1.37 → 0.72 MB (−47%) | No accuracy change; slower on CPU, so use it for GPU or as a download format |
-| **Layer + kernel fusion** | Folds BatchNorm into conv/Linear weights, collapses reparameterizable branches, turns `conv → BN → act` into one module call | PyTorch 4.82 → 2.92 ms (1.65×); 13K fewer params (−3.5%); 1.37 → 1.21 MB | None measurable (parity ≈ 3e-5); shared modules are skipped, so a few BN layers can remain |
-| **ONNX export + simplify** | Removes the Python dispatcher, folds constants and dead branches | PyTorch 4.82 → 0.99 ms (4.9×) | Adds onnxruntime as a runtime dependency |
-| **INT8 QDQ** | Statically calibrated 8-bit weights *and* activations | FP32 ONNX 0.99 → 0.82 ms; fused 0.83 → 0.65 ms; fused file 1.22 → 0.52 MB | mAP 0.601 → 0.589, box IoU 0.91–0.93; needs representative calibration images |
+| **Layer + kernel fusion** | Folds BatchNorm into conv/Linear weights, collapses reparameterizable branches, turns `conv → BN → act` into one module call | PyTorch 4.80 → 2.98 ms (1.6×); 13K fewer params (−3.5%); 1.37 → 1.21 MB | None measurable (parity ≈ 3e-5); shared modules are skipped, so a few BN layers can remain |
+| **ONNX export + simplify** | Removes the Python dispatcher, folds constants and dead branches | PyTorch 4.80 → 1.10 ms (4.4×) | Adds onnxruntime as a runtime dependency |
+| **INT8 QDQ** | Statically calibrated 8-bit weights *and* activations | FP32 ONNX 1.10 → 0.83 ms; fused 0.81 → 0.64 ms; fused file 1.22 → 0.52 MB | mAP 0.601 → 0.589, box IoU 0.90–0.92; needs representative calibration images |
 
 A few things worth knowing when reading the table:
 
 - **Fusion matters more in eager PyTorch than in ONNX.** Folding BN removes a
   kernel launch per block; ONNX Runtime and TensorRT already fuse some of that,
-  so the remaining gain there is smaller (0.99 → 0.83 ms).
+  so the remaining gain there is smaller (1.10 → 0.81 ms).
 - **INT8 is where most of the size win is.** Quantizing the fused graph keeps
   the folded weights and drops the redundant BN scales, which is why the fused
   INT8 file is the smallest artifact (0.52 MB).
