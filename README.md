@@ -138,6 +138,7 @@ That is the full loop: data → training → checkpoint → predictions.
 | **Pico-Zoo** | Choose from 40 lightweight backbone names under one detector |
 | **LoRA / QLoRA** | Fine-tune with a small fraction of trainable parameters |
 | **FP16 + ONNX** | Export for CPU, GPU, mobile and edge runtimes |
+| **INT8 quantization** | Static, dynamic, QAT and layer-aware FlashDet policies |
 | **Tracking + solutions** | Counting, speed, heatmaps, queues, alarms and more |
 | **Tests + security checks** | Unit, integration, security and load/chaos tests in CI |
 
@@ -582,6 +583,7 @@ FlashDet/
 │   │   └── lora.py                  # LoRA / QLoRA variants
 │   ├── losses/                      # E2E, YOLO and Varifocal losses
 │   ├── utils/                       # Checkpoints, metrics, visualization, optimizations
+│   ├── quantization/                # static, dynamic, QAT and layer-aware INT8
 │   ├── trackers/                    # SORT, ByteTrack, BoT-SORT, DeepSORT, OC-SORT, StrongSORT
 │   ├── solutions/                   # Ready-to-use vision solutions
 │   └── analytics/                   # Benchmark, profiling, plots, reports
@@ -615,6 +617,7 @@ FlashDet/
 | [Training Matrix](docs/TRAINING-MATRIX.md) | 1,000-image / 10-class run across all model sizes |
 | [Hardcoding Audit](docs/HARDCODING-AUDIT.md) | Configuration cleanup notes |
 | [FAQ](docs/FAQ.md) | Common questions |
+| [Quantization](docs/QUANTIZATION.md) | Static, dynamic, QAT and layer-aware INT8 |
 | [Publishing](docs/PUBLISHING.md) | Auto-publish GitHub → PyPI |
 | [Changelog](docs/CHANGELOG.md) | Version history |
 

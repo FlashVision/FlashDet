@@ -8,6 +8,9 @@ All notable changes to FlashDet will be documented in this file.
 - **Pico-Zoo backbones** — `FlashDet-P` now accepts all 40 architecture names from the Pico model table via `--backbone` / `backbone_type` (`repvit`, `mobileone`, `edgenext`, `mambaout`, `pp_lcnet`, `convnextv2`, ...).
 - **Pico-Zoo necks** — matching lightweight PAN neck families (`rep`, `ghost`, `attention`, `mamba`, `lcnet`) selected automatically or with `--neck`.
 - `scripts/train_pico_zoo.sh` and `docs/Pico-Zoo.md`.
+- **Quantization toolkit** — `flashdet/quantization/` with static (MinMax,
+  percentile, histogram/MSE, SmoothQuant), dynamic/weight-only INT8, QAT
+  (fake quant, LSQ, PACT) and `QuantFlashDet` layer-aware policies.
 - `flashdet.data.demo.create_demo_dataset()` + `scripts/create_demo_dataset.py`
   so examples work from a clean checkout (the old `data/demo` had annotations
   but no images).

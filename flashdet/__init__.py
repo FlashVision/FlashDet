@@ -20,6 +20,13 @@ from flashdet.solutions import (
 )
 from flashdet.analytics import Benchmark
 from flashdet.data.download import download_dataset, list_datasets
+from flashdet.quantization import (
+    QuantFlashDet,
+    QuantLayerPolicy,
+    quantize_static,
+    quantize_dynamic,
+    quantize_weight_only,
+)
 
 __all__ = [
     "FlashDet", "build_model", "Trainer", "Validator", "Predictor",
@@ -30,5 +37,7 @@ __all__ = [
     "SecurityAlarm", "WorkoutMonitor", "LiveInference", "AnalyticsDashboard",
     "Benchmark",
     "download_dataset", "list_datasets",
+    "QuantFlashDet", "QuantLayerPolicy",
+    "quantize_static", "quantize_dynamic", "quantize_weight_only",
     "__version__",
 ]
