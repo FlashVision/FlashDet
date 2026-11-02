@@ -38,7 +38,8 @@ flashdet/quantization/
 | Family | Algorithms |
 |---|---|
 | Observers | MinMax, Percentile, Histogram/MSE, Entropy/KL-style clipping |
-| Static PTQ | Calibration-based INT8 fake quant, per-channel weights, SmoothQuant channel scaling, eager `torch.ao` path |
+| Static PTQ | MinMax/Percentile/Histogram calibration, per-channel weights, SmoothQuant, eager `torch.ao` path |
+| Weight-only PTQ | AWQ (activation-aware scaling), GPTQ (Hessian error compensation), group-wise 2/4/8-bit |
 | Dynamic | Dynamic INT8 Linear, INT8 weight-only Conv2d/Linear |
 | QAT | Observer-based fake quant, LSQ learned step size, PACT activation clipping, prepare/convert |
 | FlashDet | Per-group backbone/neck/head policies, layer reports |
@@ -66,6 +67,46 @@ from flashdet.quantization import quantize_dynamic, quantize_weight_only
 qmodel = quantize_dynamic(model, layer_prefixes=("backbone", "neck"))
 qmodel = quantize_weight_only(model, layer_prefixes=("backbone", "neck", "head"))
 ```
+
+### AWQ
+
+```python
+from flashdet.quantization import quantize_awq
+
+qmodel = quantize_awq(
+    model,
+    calib_loader=calib_loader,
+    bits=4,
+    group_size=128,
+    alpha=0.5,
+    layer_prefixes=("backbone", "neck"),
+    num_batches=32,
+)
+```
+
+AWQ computes per-input-channel activation scales, folds them into the weights,
+then applies group-wise weight-only quantization. The wrapper divides incoming
+activations by the same scale.
+
+### GPTQ
+
+```python
+from flashdet.quantization import quantize_gptq
+
+qmodel = quantize_gptq(
+    model,
+    calib_loader=calib_loader,
+    bits=8,
+    group_size=-1,       # -1 = per-output-channel
+    damp=0.01,
+    layer_prefixes=("backbone", "neck"),
+    num_batches=32,
+)
+```
+
+GPTQ collects an input Hessian per layer and quantizes column-by-column with
+error compensation. It supports Linear and regular Conv2d (`groups=1`);
+depthwise Conv2d is left for AWQ/weight-only quantization.
 
 ### Static calibration
 
@@ -109,6 +150,23 @@ qat_model = prepare_qat(model, layer_prefixes=("backbone", "neck"))
 final_model = convert_qat(qat_model)          # trained fake-quant model
 # or if your graph supports eager boundaries:
 final_model = convert_qat(qat_model, example_input=sample)
+```
+
+## Class-based interfaces
+
+```python
+from flashdet.quantization import (
+    PTQQuantizer, AWQQuantizer, GPTQQuantizer, QATQuantizer,
+)
+
+qmodel = PTQQuantizer(model).quantize(calib_loader)
+qmodel = AWQQuantizer(model, bits=4).quantize(calib_loader)
+qmodel = GPTQQuantizer(model, bits=8).quantize(calib_loader)
+
+qat = QATQuantizer(model)
+qat.prepare(layer_prefixes=("backbone", "neck"))
+# train qat.model for a few epochs
+qmodel = qat.convert()
 ```
 
 ## Notes

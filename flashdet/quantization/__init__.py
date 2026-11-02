@@ -48,9 +48,22 @@ from .quantflashdet import (
     quantization_report,
 )
 from .static_quantization import (
+    AWQConfig,
+    AWQQuantizer,
+    GPTQQuantizer,
+    PTQQuantizer,
+    AWQConv2d,
+    AWQLinear,
+    GPTQConfig,
+    GPTQConv2d,
+    GPTQLinear,
     apply_smooth_scale,
+    awq_quantize_weight,
     calibrate,
     compute_smooth_scale,
+    gptq_quantize_weight,
+    quantize_awq,
+    quantize_gptq,
     quantize_static,
     quantize_static_ao,
     quantize_static_layers,
@@ -58,6 +71,7 @@ from .static_quantization import (
     smoothquant_layer,
 )
 from .training_aware_quant import (
+    QATQuantizer,
     convert_qat,
     prepare_qat,
     qat_finetune,
@@ -72,12 +86,16 @@ __all__ = [
     # static
     "calibrate", "quantize_static", "quantize_static_ao", "quantize_static_layers",
     "set_layer_qconfig", "compute_smooth_scale", "apply_smooth_scale",
-    "smoothquant_layer",
+    "smoothquant_layer", "quantize_awq", "awq_quantize_weight",
+    "AWQConfig", "AWQLinear", "AWQConv2d",
+    "quantize_gptq", "gptq_quantize_weight",
+    "GPTQConfig", "GPTQLinear", "GPTQConv2d",
+    "PTQQuantizer", "AWQQuantizer", "GPTQQuantizer",
     # dynamic
     "quantize_dynamic", "quantize_dynamic_int8", "quantize_weight_only",
     "Int8WeightOnlyConv2d", "Int8WeightOnlyLinear",
     # QAT
-    "prepare_qat", "convert_qat", "qat_finetune",
+    "prepare_qat", "convert_qat", "qat_finetune", "QATQuantizer",
     # FlashDet layer-aware
     "QuantFlashDet", "QuantLayerPolicy", "DEFAULT_POLICY", "quantization_report",
 ]

@@ -4,12 +4,19 @@ import torch
 import torch.nn as nn
 
 from flashdet.models.architectures.flashdet import FlashDet
+from flashdet.quantization.static_quantization.weight_utils import (
+    dequantize_weight_per_group,
+)
 from flashdet.quantization import (
     Int8WeightOnlyConv2d,
     LSQFakeQuantize,
     MinMaxObserver,
     PACTActivation,
     QuantConfig,
+    AWQQuantizer,
+    GPTQQuantizer,
+    PTQQuantizer,
+    QATQuantizer,
     QuantFlashDet,
     QuantLayerPolicy,
     apply_smooth_scale,
@@ -17,7 +24,9 @@ from flashdet.quantization import (
     convert_qat,
     fake_quantize,
     prepare_qat,
+    quantize_awq,
     quantize_dynamic,
+    quantize_gptq,
     quantize_static,
     quantize_weight_only,
 )
@@ -74,6 +83,73 @@ def test_static_calibrated_flashdet_forward():
     assert torch.isfinite(out["o2o_cls"]).all()
 
 
+def test_awq_quantizes_flashdet():
+    model, x = _model()
+    calib = [torch.randn(1, 3, 64, 64) for _ in range(2)]
+    qmodel = quantize_awq(
+        model, calib, bits=4, group_size=32,
+        layer_prefixes=("backbone", "neck"), num_batches=2,
+    )
+    with torch.no_grad():
+        out = qmodel(x)
+    assert out["o2o_cls"].shape[0] == 1
+    assert torch.isfinite(out["o2o_cls"]).all()
+
+
+def test_gptq_quantizes_linear_and_returns_finite_output():
+    model = nn.Sequential(
+        nn.Linear(16, 16),
+        nn.ReLU(),
+        nn.Linear(16, 4),
+    ).eval()
+    calib = [torch.randn(8, 16) for _ in range(4)]
+    qmodel = quantize_gptq(model, calib, bits=8, group_size=8, num_batches=4)
+    x = torch.randn(3, 16)
+    with torch.no_grad():
+        y = qmodel(x)
+    assert y.shape == (3, 4)
+    assert torch.isfinite(y).all()
+
+
+def test_awq_8bit_reconstruction_error_is_small():
+    from flashdet.quantization import awq_quantize_weight
+
+    weight = torch.randn(32, 64)
+    activation = torch.rand(64) * 2
+    q, scales, zeros, input_scale, gs = awq_quantize_weight(
+        weight, activation, bits=8, group_size=32,
+    )
+    dq = dequantize_weight_per_group(q, scales, zeros, tuple(weight.shape), gs)
+    dq = dq / input_scale.view(1, -1)
+    rel = (dq - weight).norm() / weight.norm()
+    assert rel.item() < 0.1
+
+
+def test_gptq_8bit_reconstruction_error_is_small():
+    from flashdet.quantization import gptq_quantize_weight
+
+    weight = torch.randn(16, 32)
+    q, scales, zeros, gs = gptq_quantize_weight(
+        weight, torch.eye(32), bits=8, group_size=32,
+    )
+    dq = dequantize_weight_per_group(q, scales, zeros, tuple(weight.shape), gs)
+    rel = (dq - weight).norm() / weight.norm()
+    assert rel.item() < 0.1
+
+
+def test_gptq_quantizes_flashdet_conv_paths():
+    model, x = _model()
+    calib = [torch.randn(1, 3, 64, 64) for _ in range(2)]
+    qmodel = quantize_gptq(
+        model, calib, bits=8, group_size=-1,
+        layer_prefixes=("backbone", "neck"), num_batches=2,
+    )
+    with torch.no_grad():
+        out = qmodel(x)
+    assert out["o2o_cls"].shape[0] == 1
+    assert torch.isfinite(out["o2o_cls"]).all()
+
+
 def test_quantflashdet_layer_policy_report():
     model, x = _model()
     calib = [torch.randn(1, 3, 64, 64) for _ in range(2)]
@@ -116,6 +192,36 @@ def test_lsq_and_pact_are_differentiable():
     assert out.max().item() <= 2.01
     out.sum().backward()
     assert pact.alpha.grad is not None
+
+
+def test_class_based_quantizer_interfaces():
+    linear = nn.Sequential(nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 4)).eval()
+    calib_linear = [torch.randn(8, 16) for _ in range(4)]
+
+    awq_model = AWQQuantizer(linear, bits=4, group_size=8).quantize(
+        calib_linear, num_batches=4
+    )
+    with torch.no_grad():
+        assert torch.isfinite(awq_model(torch.randn(2, 16))).all()
+
+    gptq_model = GPTQQuantizer(linear, bits=8, group_size=8).quantize(
+        calib_linear, num_batches=4
+    )
+    with torch.no_grad():
+        assert torch.isfinite(gptq_model(torch.randn(2, 16))).all()
+
+    ptq = PTQQuantizer(linear)
+    with torch.no_grad():
+        assert torch.isfinite(ptq.quantize(calib_linear, num_batches=4)(torch.randn(2, 16))).all()
+
+    qat = QATQuantizer(linear)
+    qat.prepare(layer_prefixes=("",), keep_float_prefixes=())
+    qat.model.eval()
+    with torch.no_grad():
+        assert torch.isfinite(qat.model(torch.randn(2, 16))).all()
+    converted = qat.convert()
+    with torch.no_grad():
+        assert torch.isfinite(converted(torch.randn(2, 16))).all()
 
 
 def test_smoothquant_scaling_preserves_conv_output():

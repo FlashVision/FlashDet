@@ -8,6 +8,9 @@ from flashdet.quantization.base import (
     PercentileObserver,
     QuantConfig,
 )
+from .awq import AWQConfig, AWQConv2d, AWQLinear, awq_quantize_weight, quantize_awq
+from .gptq import GPTQConfig, GPTQConv2d, GPTQLinear, gptq_quantize_weight, quantize_gptq
+from .quantizers import AWQQuantizer, GPTQQuantizer, PTQQuantizer
 from .ptq import (
     calibrate,
     quantize_static,
@@ -36,4 +39,17 @@ __all__ = [
     "compute_smooth_scale",
     "apply_smooth_scale",
     "smoothquant_layer",
+    "AWQConfig",
+    "AWQLinear",
+    "AWQConv2d",
+    "quantize_awq",
+    "awq_quantize_weight",
+    "GPTQConfig",
+    "GPTQLinear",
+    "GPTQConv2d",
+    "quantize_gptq",
+    "gptq_quantize_weight",
+    "PTQQuantizer",
+    "AWQQuantizer",
+    "GPTQQuantizer",
 ]

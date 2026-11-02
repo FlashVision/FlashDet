@@ -8,6 +8,7 @@ from .fake_quant import (
     quant_error,
 )
 from .qat import convert_qat, prepare_qat, qat_finetune
+from .quantizer import QATQuantizer, qat_train
 
 __all__ = [
     "FakeQuantize",
@@ -18,4 +19,6 @@ __all__ = [
     "prepare_qat",
     "convert_qat",
     "qat_finetune",
+    "QATQuantizer",
+    "qat_train",
 ]

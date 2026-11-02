@@ -138,7 +138,7 @@ That is the full loop: data → training → checkpoint → predictions.
 | **Pico-Zoo** | Choose from 40 lightweight backbone names under one detector |
 | **LoRA / QLoRA** | Fine-tune with a small fraction of trainable parameters |
 | **FP16 + ONNX** | Export for CPU, GPU, mobile and edge runtimes |
-| **INT8 quantization** | Static, dynamic, QAT and layer-aware FlashDet policies |
+| **INT8 quantization** | Static, AWQ, GPTQ, dynamic, QAT and layer-aware policies |
 | **Tracking + solutions** | Counting, speed, heatmaps, queues, alarms and more |
 | **Tests + security checks** | Unit, integration, security and load/chaos tests in CI |
 
