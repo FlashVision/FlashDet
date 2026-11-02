@@ -169,6 +169,47 @@ print(model.get_model_info())
 
 ---
 
+## Training Benchmark
+
+All six sizes were trained and validated on a reproducible **1,000-image,
+10-class** synthetic dataset. This is a smoke benchmark for correctness and
+convergence, not a COCO accuracy claim.
+
+**15 epochs, 128×128 input, CPU:**
+
+| Model | Params | mAP@0.5 | Training time |
+|---|---:|---:|---:|
+| FlashDet-P | 0.40M | 0.801 | 2m 35s |
+| FlashDet-N | 0.85M | 0.699 | 2m 42s |
+| FlashDet-S | 1.95M | 0.767 | 3m 28s |
+| FlashDet-M | 4.23M | 0.857 | 4m 48s |
+| FlashDet-L | 7.25M | 0.844 | 6m 23s |
+| FlashDet-X | 11.26M | 0.896 | 8m 00s |
+
+What the run showed:
+
+- Every size trained, validated, saved, reloaded and exported to ONNX.
+- **P** is fastest on short runs because its default backbone is pretrained.
+- **N/S** train from scratch and need more epochs than P.
+- **M** is the best accuracy/time balance in this test.
+- **X** gives the highest final mAP but is the slowest.
+
+The benchmark also exposed and fixed two training bugs: a ProgLoss epoch
+mismatch between training and validation, and a batch-size-dependent validation
+loss.
+
+Reproduce it with:
+
+```bash
+python scripts/create_synthetic_dataset.py \
+  --output /tmp/synth10 --train 1000 --val 200 --size 192 --classes 10
+```
+
+Full numbers, commands and per-model notes:
+**[docs/TRAINING-MATRIX.md](docs/TRAINING-MATRIX.md)**.
+
+---
+
 ## Pico-Zoo
 
 `FlashDet-P` supports **40 lightweight backbone names** from the Pico architecture

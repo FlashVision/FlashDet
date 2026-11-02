@@ -2,7 +2,7 @@
 
 All notable changes to FlashDet will be documented in this file.
 
-## [Unreleased]
+## [1.3.0] — 2026-11-02
 
 ### Added
 - **Pico-Zoo backbones** — `FlashDet-P` now accepts all 40 architecture names from the Pico model table via `--backbone` / `backbone_type` (`repvit`, `mobileone`, `edgenext`, `mambaout`, `pp_lcnet`, `convnextv2`, ...).
@@ -12,6 +12,9 @@ All notable changes to FlashDet will be documented in this file.
   so examples work from a clean checkout (the old `data/demo` had annotations
   but no images).
 - Archived the old `currDATA/` training logs under `docs/training-logs/`.
+- `scripts/create_synthetic_dataset.py` and `docs/TRAINING-MATRIX.md` — reproducible
+  1,000-image / 10-class training matrix for every model size.
+- Repository-level GitHub Copilot instructions and `copilot-setup-steps` workflow.
 
 ### Changed
 - **Config-driven defaults** — Pico stem/depths/neck width, FPN strides, LR scaling
