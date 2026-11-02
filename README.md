@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/FlashVision/FlashDet/main/assets/logo.png" width="200" alt="FlashDet Logo">
+  <img src="https://raw.githubusercontent.com/FlashVision/FlashDet/main/assets/logo.png" width="180" alt="FlashDet Logo">
 </p>
 
 <h1 align="center">FlashDet</h1>
@@ -15,96 +15,55 @@
 </p>
 
 <p align="center">
-  <b>Ultra-lightweight real-time object detection with advanced training methods, LoRA fine-tuning, tracking, and analytics</b>
+  <b>Ultra-lightweight real-time object detection for edge devices, with a simple training API, NMS-free inference, LoRA fine-tuning, tracking and analytics.</b>
 </p>
 
 <p align="center">
-  <a href="#installation">Install</a> •
-  <a href="#architectures">Architectures</a> •
-  <a href="#usage">Usage</a> •
-  <a href="#training-methods">Training Methods</a> •
-  <a href="#solutions">Solutions</a> •
-  <a href="#trackers">Trackers</a> •
-  <a href="#project-structure">Structure</a> •
-  <a href="#contributing">Contributing</a>
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#model-sizes">Models</a> •
+  <a href="#pico-zoo">Pico-Zoo</a> •
+  <a href="#training">Training</a> •
+  <a href="#inference">Inference</a> •
+  <a href="#testing">Testing</a> •
+  <a href="#documentation">Docs</a>
 </p>
 
 ---
 
 ## What is FlashDet?
 
-FlashDet is an end-to-end object detection framework built for **speed, accuracy, and extensibility**. The core FlashDet model features a dual detection head (NMS-free one-to-one + dense one-to-many), **STAL** (Small-Target-Aware Label Assignment), **ProgLoss** (Progressive Loss Balancing), and the **MuSGD** (Muon+SGD hybrid) optimizer.
+FlashDet is an end-to-end object detection framework. You give it a
+COCO-format dataset; it gives you a trained detector, validation metrics, and a
+deployable FP16 or ONNX model.
 
-The framework supports **6 training methods** — all through a unified, registry-based, pluggable design.
+It is designed to be:
 
-```
-Training Pipeline:
-  Dataset → Augmentation → FlashDet Model
-    ├── Classification Loss (BCE)
-    ├── Box Loss (CIoU + L1, ProgLoss weighted)
-    └── STAL Assignment
-        → MuSGD → Updated Weights
-```
----
+- **Small** — the default Pico model is ~370K parameters (~0.71 MB FP16).
+- **Fast** — NMS-free one-to-one inference; no post-processing NMS step.
+- **Practical** — one Python API and one CLI for training, validation,
+  inference, export, tracking and analytics.
+- **Hackable** — backbones, necks, heads, losses and trackers are pluggable.
 
-## Model Sizes
-
-| Model | Backbone | Params (Inference) | FP16 Size | Notes |
-|---|---|---|---|---|
-| **FlashDet-P** (Pico) | LiteBackbone-0.5x / PicoBackbone + PicoNeck | ~298K | **0.57 MB** | Sub-1MB, depthwise heads |
-| **FlashDet-N** (Nano) | FlashBackbone (w=0.25, d=0.33) | ~1.06M | 2.01 MB | Lightweight |
-| **FlashDet-S** (Small) | FlashBackbone (w=0.50, d=0.33) | ~5.4M | 10.3 MB | Balanced |
-| **FlashDet-M** (Medium) | FlashBackbone (w=1.00, d=0.67) | ~18M | 34.3 MB | High accuracy |
-
-**FlashDet-P (Pico)** is designed for extreme edge deployment (microcontrollers, mobile, browser). It uses:
-- **LiteBackbone-0.5x** with pretrained weights (channel mixing + depthwise convolutions)
-- **PicoNeck** with 64-ch output (lightweight modules for efficient feature generation)
-- **Depthwise-separable E2E dual head** (DW-conv + pointwise instead of full convolutions)
-- Same STAL + ProgLoss training recipe as larger variants
-
-### Pico-Zoo backbones and necks
-
-`FlashDet-P` accepts **all 40 architecture names** from the Pico model table:
-
-```bash
-# RepViT / MobileOne / FastViT / RepGhostNet
-python train.py --model-size p --backbone repvit ...
-
-# EdgeNeXt / MobileViTv2 / EfficientFormerV2 / SHViT / EfficientViT / SwiftFormer
-python train.py --model-size p --backbone edgenext ...
-
-# EfficientNetV2 / EMO / FasterNet / StarNet / MobileNetV4 / GhostNetV2
-python train.py --model-size p --backbone mobilenetv4 ...
-
-# MobileMamba / EfficientVMamba / MambaVision / MambaOut / EfficientViM
-python train.py --model-size p --backbone mambaout --neck mamba ...
-
-# PP-LCNet / LCNet / ESNet / PeleeNet / ShuffleNetV2
-python train.py --model-size p --backbone pp_lcnet ...
-
-# ... and InceptionNeXt, UniRepLKNet, ConvNeXtV2, EfficientRep, ReXNet,
-# MobileFormer, EdgeViT, TinyViT, LeViT, LowFormer, LocalMamba, VMamba,
-# PlainMamba
-```
-
-The neck family is selected automatically from the backbone family, or set it
-explicitly with `--neck {pan,rep,ghost,attention,mamba,lcnet}`. See
-[docs/Pico-Zoo.md](docs/Pico-Zoo.md) for the full list and family mapping.
+No YOLO config files are required. The dataset loader reads COCO JSON directly
+and discovers class names automatically.
 
 ---
 
-## Installation
+## Quick Start
 
-### pip (recommended)
+### 1. Install
 
 ```bash
 pip install flashdet
+```
 
-# With all extras (tracking, analytics, ONNX export)
+For tracking, analytics and ONNX export:
+
+```bash
 pip install "flashdet[all]"
 ```
 
-### From source (for development)
+From source:
 
 ```bash
 git clone https://github.com/FlashVision/FlashDet.git
@@ -112,303 +71,467 @@ cd FlashDet
 pip install -e ".[all]"
 ```
 
-### Optional extras
+Check that everything works:
 
 ```bash
-pip install -e ".[export]"      # ONNX export support
-pip install -e ".[tracker]"     # FlashTracker, MotionTracker, AppearanceTracker
-pip install -e ".[solutions]"   # Counting, speed, heatmaps
-pip install -e ".[analytics]"   # Benchmarking, plots
-pip install -e ".[all]"         # Everything
+flashdet check
 ```
 
-### Verify installation
+### 2. Create a tiny demo dataset
+
+No dataset? Generate a small synthetic one:
 
 ```bash
-flashdet check       # runs full health check
-flashdet settings    # shows Python, PyTorch, CUDA, GPU info
-flashdet version     # prints version
+python scripts/create_demo_dataset.py
 ```
+
+This creates `data/demo/train` and `data/demo/valid` with images and COCO
+annotations.
+
+### 3. Train
+
+```bash
+python train.py \
+  --model-size p \
+  --backbone repvit \
+  --epochs 2 \
+  --batch-size 4 \
+  --input-size 320 \
+  --train-images data/demo/train \
+  --val-images data/demo/valid \
+  --save-dir workspace/demo \
+  --val-interval 1 \
+  --workers 0
+```
+
+The best checkpoint is written to `workspace/demo/model_best_inference.pth`.
+If you do not have CUDA, add `--device cpu` to the command.
+
+### 4. Run inference
+
+```bash
+python test.py \
+  --model workspace/demo/model_best_inference.pth \
+  --image data/demo/valid/valid_0001.jpg \
+  --device cpu
+```
+
+Or use the CLI:
+
+```bash
+flashdet predict \
+  --model workspace/demo/model_best_inference.pth \
+  --source data/demo/valid/valid_0001.jpg
+```
+
+That is the full loop: data → training → checkpoint → predictions.
 
 ---
 
-## Usage
+## Why FlashDet?
 
-### Python API
+| Feature | What it means for you |
+|---|---|
+| **NMS-free inference** | Faster deployment and simpler post-processing |
+| **STAL assignment** | Better supervision for small objects |
+| **ProgLoss** | Trains the dense head first, then refines the NMS-free head |
+| **Pico-Zoo** | Choose from 40 lightweight backbone names under one detector |
+| **LoRA / QLoRA** | Fine-tune with a small fraction of trainable parameters |
+| **FP16 + ONNX** | Export for CPU, GPU, mobile and edge runtimes |
+| **Tracking + solutions** | Counting, speed, heatmaps, queues, alarms and more |
+| **Tests + security checks** | Unit, integration, security and load/chaos tests in CI |
+
+---
+
+## Model Sizes
+
+All sizes use the same FlashDet detection head, loss and NMS-free inference
+path. Parameter counts below are for 80 classes with the default configuration.
+
+| Model | Size | Inference Params | FP16 Weights | Good for |
+|---|---:|---:|---:|---|
+| **FlashDet-P** (Pico) | `p` | ~370K | ~0.71 MB | Microcontrollers, browser, mobile |
+| **FlashDet-N** (Nano) | `n` | ~804K | ~1.53 MB | Edge devices, real-time CPU |
+| **FlashDet-S** (Small) | `s` | ~1.86M | ~3.55 MB | Balanced edge accuracy |
+| **FlashDet-M** (Medium) | `m` | ~4.03M | ~7.68 MB | GPU / desktop accuracy |
+| **FlashDet-L** (Large) | `l` | ~6.88M | ~13.1 MB | Higher accuracy |
+| **FlashDet-X** (XLarge) | `x` | ~10.7M | ~20.4 MB | Maximum accuracy |
 
 ```python
-from flashdet import FlashDet, Trainer
+from flashdet import FlashDet
 
-# Build sub-1MB Pico model for edge deployment
-pico = FlashDet(num_classes=80, size="p")
-print(pico.get_model_info())  # inference_fp16_mb: 0.57
+model = FlashDet(num_classes=80, size="p")
+print(model.get_model_info())
+```
 
-# Build with reparameterizable backbone
-pico_v2 = FlashDet(num_classes=80, size="p", backbone_type="repnext")
+> The Pico-Zoo variants below can be smaller or larger than the default Pico,
+> depending on the backbone family and width.
 
-# Build larger model
-model_n = FlashDet(num_classes=80, size="n")
+---
 
-# Train
+## Pico-Zoo
+
+`FlashDet-P` supports **40 lightweight backbone names** from the Pico architecture
+table. Each backbone has a matching neck family, and the neck is selected
+automatically unless you override it.
+
+| Family | Backbone examples | Matching neck |
+|---|---|---|
+| Reparameterized CNN | `repvit`, `mobileone`, `fastvit`, `repghostnet` | `rep` |
+| Lightweight attention | `edgenext`, `mobilevitv2`, `efficientformerv2`, `shvit`, `efficientvit`, `swiftformer` | `attention` |
+| Lightweight CNN | `efficientnetv2`, `emo`, `fasternet`, `starnet`, `mobilenetv4`, `ghostnetv2` | `ghost` |
+| Visual Mamba / SSM | `mobilemamba`, `efficientvmamba`, `mambavision`, `mambaout`, `efficientvim` | `mamba` |
+| Detection-oriented CNN | `pp_lcnet`, `lcnet`, `esnet`, `pp_lcnetv2`, `peleenet`, `shufflenetv2` | `lcnet` |
+| Modern efficient CNN | `inceptionnext`, `unireplknet`, `convnextv2`, `efficientrep`, `rexnet` | `rep` |
+| Lightweight transformers | `mobileformer`, `edgevit`, `tinyvit`, `levit`, `lowformer` | `attention` |
+| Additional SSM | `localmamba`, `vmamba`, `plainmamba` | `mamba` |
+
+```bash
+# RepViT-style Pico
+python train.py --model-size p --backbone repvit ...
+
+# EdgeNeXt-style Pico with attention neck
+python train.py --model-size p --backbone edgenext --neck attention ...
+
+# MambaOut-style Pico
+python train.py --model-size p --backbone mambaout --neck mamba ...
+
+# PP-LCNet-style Pico
+python train.py --model-size p --backbone pp_lcnet --neck lcnet ...
+```
+
+Or use the helper script:
+
+```bash
+BACKBONE=repvit NECK=rep bash scripts/train_pico_zoo.sh
+```
+
+Full list, parameter counts and family mapping:
+**[docs/Pico-Zoo.md](docs/Pico-Zoo.md)**.
+
+---
+
+## Training
+
+### Dataset format
+
+FlashDet expects COCO JSON next to each split's images:
+
+```text
+data/my_dataset/
+├── train/
+│   ├── image_0001.jpg
+│   ├── image_0002.jpg
+│   └── _annotations.coco.json
+└── valid/
+    ├── image_0001.jpg
+    └── _annotations.coco.json
+```
+
+Class names are read from the annotation file. You can override them with
+`--class-file classes.txt`.
+
+### Train from the command line
+
+```bash
+python train.py \
+  --model-size n \
+  --epochs 100 \
+  --batch-size 32 \
+  --input-size 320 \
+  --train-images data/my_dataset/train \
+  --val-images data/my_dataset/valid \
+  --save-dir workspace/my_model \
+  --amp \
+  --device cuda
+```
+
+Common options:
+
+| Option | Purpose |
+|---|---|
+| `--model-size p/n/s/m/l/x` | Choose the detector size |
+| `--backbone ...` | Pico backbone name (Pico only) |
+| `--neck ...` | Pico neck family (Pico only) |
+| `--amp` | Mixed precision training |
+| `--multi-gpu` | DDP / DataParallel training |
+| `--mosaic`, `--mixup` | Stronger augmentation |
+| `--multi-scale` | Random input sizes during training |
+| `--resume checkpoint.pth` | Resume training |
+| `--finetune checkpoint.pth` | Warm-start from weights |
+| `--config config.yaml` | Load model/data/train settings from YAML |
+
+### Train from Python
+
+```python
+from flashdet import Trainer
+
 trainer = Trainer(
-    model_size="p",   # "p" (Pico), "n", "s", "m", "l", "x"
-    train_images="data/train",
-    val_images="data/val",
+    model_size="p",
+    train_images="data/my_dataset/train",
+    val_images="data/my_dataset/valid",
     epochs=100,
+    batch_size=32,
     device="cuda",
 )
 trainer.train()
 ```
 
-### CLI
+### Training methods
+
+| Method | Class | Script |
+|---|---|---|
+| Standard supervised | `Trainer` | `train.py` |
+| Self-supervised pretraining | `SSLTrainer` | `scripts/train_ssl.py` |
+| Semi-supervised | `SemiSupervisedTrainer` | `scripts/train_semi_supervised.py` |
+| Few-shot | `FewShotTrainer` | `scripts/train_few_shot.py` |
+| Active learning | `ActiveLearningTrainer` | `scripts/train_active_learning.py` |
+
+Examples:
 
 ```bash
-# Train (use --model-size p for Pico, n for Nano, s for Small, etc.)
-flashdet train --model-size p --epochs 100 --device cuda \
-  --train-images data/train --val-images data/val
+# Self-supervised backbone pretraining
+python scripts/train_ssl.py --method byol --data-dir data/unlabeled --epochs 100
 
-# Validate
-flashdet val --model best.pth --val-images data/val
-```
-
-### Standalone Scripts
-
-```bash
-# Full training with LoRA
-python train.py --lora --lora-rank 8 --epochs 50 --device cuda
-
-# Inference
-python test.py --model best.pth --image photo.jpg
-```
-
----
-
-## Training Methods
-
-FlashDet supports 5 training paradigms, each with a dedicated trainer class and CLI script:
-
-| Method | Trainer Class | CLI Script | Description |
-|---|---|---|---|
-| **Standard** | `Trainer` | `train.py` | Full supervised training with all augmentations |
-| **Self-Supervised (SSL)** | `SSLTrainer` | `scripts/train_ssl.py` | BYOL pretraining on unlabeled data |
-| **Semi-Supervised** | `SemiSupervisedTrainer` | `scripts/train_semi_supervised.py` | Teacher-student with pseudo-labels |
-| **Few-Shot** | `FewShotTrainer` | `scripts/train_few_shot.py` | Learn from very few labeled examples |
-| **Active Learning** | `ActiveLearningTrainer` | `scripts/train_active_learning.py` | Intelligently select samples for labeling |
-
-### Self-Supervised Pretraining
-
-```bash
-python scripts/train_ssl.py \
-  --method byol \
-  --data-dir path/to/unlabeled/images \
-  --epochs 100 --backbone-size n
-```
-
-### Semi-Supervised Learning
-
-```bash
+# Semi-supervised training
 python scripts/train_semi_supervised.py \
   --train-images data/train \
-  --unlabeled-dir path/to/unlabeled/images \
+  --unlabeled-dir data/unlabeled \
   --pseudo-threshold 0.7
-```
 
-### Few-Shot Learning
-
-```bash
+# Few-shot fine-tuning
 python scripts/train_few_shot.py \
-  --base-checkpoint path/to/base.pth \
+  --base-checkpoint workspace/base.pth \
   --n-shot 10 --freeze-backbone
-```
 
-### Active Learning
-
-```bash
+# Active learning
 python scripts/train_active_learning.py \
   --train-images data/train \
-  --unlabeled-pool path/to/unlabeled/images \
+  --unlabeled-pool data/unlabeled \
   --query-strategy entropy --budget 50 --rounds 5
 ```
 
-### LoRA / QLoRA Fine-Tuning
+### LoRA / QLoRA fine-tuning
 
-Parameter-efficient — freeze backbone, train only low-rank adapters:
+Train only a small adapter instead of the full model:
 
 ```bash
-# LoRA (6 variants: standard, dora, lora_plus, adalora, ortho, lora_fa)
+# LoRA variants: standard, dora, lora_plus, adalora, ortho, lora_fa
 python train.py --lora --lora-variant dora --lora-rank 8 --lora-alpha 16
 
-# QLoRA (quantized base weights + LoRA)
+# QLoRA: quantized base weights + LoRA
 python train.py --qlora --qlora-dtype nf4 --lora-rank 8
 ```
 
-### Mixed Precision & Multi-GPU
+See **[docs/LoRA-Fine-Tuning.md](docs/LoRA-Fine-Tuning.md)**.
+
+---
+
+## Inference
+
+### Python
+
+```python
+from flashdet import Predictor
+
+predictor = Predictor(
+    model_path="workspace/my_model/model_best_inference.pth",
+    device="cuda",
+    conf_thresh=0.25,
+)
+
+results = predictor("photo.jpg")
+for bbox, score, class_id in results:
+    print(bbox, score, class_id)
+```
+
+### CLI
 
 ```bash
-python train.py --amp --multi-gpu --device cuda
+# Single image
+flashdet predict --model best.pth --source photo.jpg
+
+# Save an annotated image
+flashdet predict --model best.pth --source photo.jpg --output results/
+```
+
+`test.py` also supports video, webcam and dataset evaluation:
+
+```bash
+# Image
+python test.py --model best.pth --image photo.jpg --device cuda
+
+# Video
+python test.py --model best.pth --video input.mp4 --output results/
+
+# Webcam
+python test.py --model best.pth --camera 0 --show
+
+# Dataset evaluation
+python test.py --model best.pth --eval --image data/valid --output results/
+```
+
+### Export
+
+```bash
+# ONNX
+flashdet export --model best.pth --output model.onnx
+
+# FP16 weights are written automatically during training:
+#   model_best_inference.pth
+#   model_best_fp16.pth
 ```
 
 ---
 
-## Core Components
+## Evaluation
 
-### STAL (Small-Target-Aware Label Assignment)
+```bash
+flashdet val --model best.pth --val-images data/my_dataset/valid
+```
 
-Task-Aligned Assignment with small-target protection — temporarily expands tiny GT boxes during candidate selection so small objects always get positive anchor supervision.
+The validator reports mAP@0.5 and per-class AP. The training loop saves the best
+checkpoint by mAP, not just by loss.
 
-### ProgLoss (Progressive Loss Balancing)
+---
 
-Linearly shifts training emphasis from the dense one-to-many head (exploration) to the NMS-free one-to-one head (refinement) over the course of training: `alpha(t): 1.0 → 0.0`.
+## Tracking
 
-### MuSGD (Muon + SGD Hybrid Optimizer)
+Multi-object tracking keeps IDs stable across frames:
 
-Applies Muon-style orthogonal updates to multi-dimensional parameters (conv weights, attention) while using standard SGD for 1D parameters (biases, norms), combining faster convergence with training stability.
+```python
+from flashdet.trackers import FlashTracker
 
-### E2E Detection Loss
+tracker = FlashTracker(max_age=30, min_hits=3, iou_threshold=0.3)
+tracks = tracker.update(detections)
+```
 
-Combines CIoU box loss, BCE classification loss, and L1 regression loss across both dual heads, weighted by the ProgLoss schedule.
+| Tracker | Method | Best for |
+|---|---|---|
+| `FlashTracker` / `SortTracker` | IoU + Kalman | General purpose, fast |
+| `ByteTracker` | Two-stage association | Low-confidence detections |
+| `OCSortTracker` | Observation-centric SORT | Occlusion handling |
+| `DeepSortTracker` | Mahalanobis + appearance | Crowded scenes |
+| `BoTSortTracker` / `AppearanceTracker` | ReID + camera motion | Re-identification |
+| `StrongSortTracker` | Enhanced DeepSORT | High-accuracy offline |
+
+See **[docs/Trackers.md](docs/Trackers.md)**.
 
 ---
 
 ## Solutions
 
-Built-in high-level applications for real-world use cases:
+Ready-made building blocks on top of detection + tracking:
 
 ```python
-from flashdet.solutions import ObjectCounter, SpeedEstimator, Heatmap
+from flashdet import Predictor
 from flashdet.trackers import FlashTracker
+from flashdet.solutions import ObjectCounter
 
-tracker = FlashTracker()
-# Solutions integrate with any detection model for real-world applications
+predictor = Predictor(model_path="best.pth", device="cuda")
+counter = ObjectCounter(
+    predictor=predictor,
+    tracker=FlashTracker(),
+    line_points=[(100, 400), (900, 400)],
+)
+
+annotated_frame, results = counter.process_frame(frame)
 ```
 
-| Solution | Description |
+| Solution | Use case |
 |---|---|
-| **ObjectCounter** | Count objects crossing lines or entering regions |
-| **SpeedEstimator** | Estimate real-world speed from tracked objects |
-| **Heatmap** | Visualize detection density over time |
-| **RegionCounter** | Count objects in polygon zones |
-| **QueueManager** | Monitor queue lengths and wait times |
-| **DistanceCalculator** | Measure real-world distances between objects |
-| **ParkingManager** | Track parking spot occupancy |
-| **SecurityAlarm** | Alert on intrusions into restricted zones |
-| **WorkoutMonitor** | Track exercise repetitions and form |
-| **LiveInference** | Real-time webcam/stream detection |
-| **AnalyticsDashboard** | Aggregated detection statistics and visualization |
----
-
-## Trackers
-
-Multi-object tracking with persistent IDs across frames:
-
-```python
-from flashdet.trackers import FlashTracker, MotionTracker, AppearanceTracker
-
-tracker = FlashTracker(max_age=30, min_hits=3, iou_threshold=0.3)
-tracks = tracker.update(detections)  # [x1,y1,x2,y2,track_id,score,cls]
-```
-
-| Tracker | Method | Best For |
-|---|---|---|
-| **FlashTracker** | IoU + Kalman filter | General purpose, fast |
-| **MotionTracker** | Kalman + Hungarian matching | Speed-critical applications |
-| **AppearanceTracker** | Appearance + motion fusion | Crowded scenes, re-identification |
+| `ObjectCounter` | Count objects crossing a line |
+| `RegionCounter` | Count objects inside polygon zones |
+| `QueueManager` | Queue length and wait time |
+| `SpeedEstimator` | Real-world speed from track history |
+| `DistanceCalculator` | Distance between objects |
+| `ParkingManager` | Parking spot occupancy |
+| `SecurityAlarm` | Restricted-zone intrusion alerts |
+| `WorkoutMonitor` | Exercise repetitions |
+| `Heatmap` | Detection density over time |
+| `LiveInference` | Webcam / stream inference |
+| `AnalyticsDashboard` | Aggregated statistics dashboard |
 
 ---
 
 ## Analytics
 
 ```python
-from flashdet.analytics import Benchmark, Profiler
+from flashdet.analytics import Benchmark, Profiler, FLOPsCounter
 
-bench = Benchmark(model_path="best.pth", device="cuda")
-results = bench.run()  # {'fps': ..., 'latency_ms': ..., 'params': ..., ...}
-
-profiler = Profiler(model_path="best.pth")
-profiler.run()  # prints per-layer timing breakdown
+Benchmark(model_path="best.pth", device="cuda").run()
+Profiler(model_path="best.pth").run()
+FLOPsCounter(model=model, input_size=320).count()
 ```
 
 ---
 
-## Training Callbacks
+## Testing
 
-Extend the training loop without modifying source code:
-
-```python
-from flashdet import Trainer
-from flashdet.engine.core.callbacks import EarlyStopping, CSVLogger, TensorBoardCallback
-
-trainer = Trainer(model_size="n", train_images="data/train", val_images="data/val")
-
-trainer.add_callback(EarlyStopping(patience=20, metric="val_mAP"))
-trainer.add_callback(CSVLogger("metrics.csv"))
-trainer.add_callback(TensorBoardCallback("runs/exp1"))
-
-trainer.train()
-```
-
-Built-in callbacks: `EarlyStopping`, `CSVLogger`, `TensorBoardCallback`, `LRSchedulerCallback`.
-
----
-
-## Registry System
-
-FlashDet uses a pluggable registry for all major components. Adding a new architecture, backbone, head, or loss is as simple as decorating your class:
-
-```python
-from flashdet.registry import DETECTORS, BACKBONES, HEADS
-
-@DETECTORS.register("MyDetector")
-class MyDetector(nn.Module):
-    ...
-
-# Later, build from config
-model = DETECTORS.build("MyDetector", num_classes=80)
-```
-
-Available registries: `DETECTORS`, `BACKBONES`, `NECKS`, `HEADS`, `LOSSES`, `DATASETS`, `TRANSFORMS`, `TRACKERS`.
----
-
-## Examples
-
-Ready-to-run scripts in [`examples/`](examples/):
-
-| Script | What it does |
-|---|---|
-| `train_custom_dataset.py` | Train on your own COCO-format dataset |
-| `train_with_lora.py` | LoRA fine-tuning (DoRA variant) |
+The project is tested at four levels:
 
 ```bash
-# Generate the synthetic demo dataset (annotations + images)
-python scripts/create_demo_dataset.py
+make test-unit           # fast unit + smoke tests
+make test-integration    # CLI, training, inference, checkpoint round-trip
+make test-security       # checkpoint/archive/input security regressions
+make test-load           # 1,000 concurrent inference + malformed inputs
+make coverage            # coverage report
+make lint                # ruff
+```
 
-cd examples
-python train_custom_dataset.py
+Details:
+
+- **[tests/TESTING.md](tests/TESTING.md)** — test structure and TDD workflow
+- **[docs/SECURITY-AUDIT.md](docs/SECURITY-AUDIT.md)** — pen-test findings and fixes
+- **[docs/LOAD-TEST.md](docs/LOAD-TEST.md)** — 1,000 / 5,000 user simulation results
+- **[docs/HARDCODING-AUDIT.md](docs/HARDCODING-AUDIT.md)** — what moved into config
+
+---
+
+## Docker
+
+```bash
+# Build
+docker build -t flashdet -f docker/Dockerfile .
+
+# Run inference
+docker run --gpus all -v $(pwd)/data:/app/data flashdet \
+  predict --model best.pth --source data/test.jpg
+```
+
+Or:
+
+```bash
+cd docker
+docker compose up
 ```
 
 ---
 
 ## Project Structure
 
-```
+<details>
+<summary>Click to expand the full tree</summary>
+
+```text
 FlashDet/
 ├── flashdet/                        # Main package
 │   ├── __init__.py                  # Public API + version
 │   ├── cli.py                       # CLI entry point
 │   ├── registry.py                  # Pluggable component registry
 │   ├── cfg/                         # Model / data / train configuration
-│   ├── data/                        # Datasets, loaders, transforms, download, demo generator
+│   ├── data/                        # Datasets, loaders, transforms, demo generator
 │   ├── engine/
 │   │   ├── core/                    # Callbacks, EMA, MuSGD optimizer
 │   │   ├── training/                # Trainer, SSL, semi-supervised, few-shot, active learning
 │   │   ├── evaluation/              # Validator
 │   │   └── inference/               # Predictor + post-processing
 │   ├── models/
-│   │   ├── architectures/           # FlashDet, FlashDet-Pico, FlashDet-Micro, YOLO variants
+│   │   ├── architectures/           # FlashDet, Pico, Micro, YOLO variants
 │   │   ├── backbone/                # Lite, Pico, Pico-Zoo, Flash, YOLO backbones
 │   │   ├── neck/                    # Pico, Pico-Zoo, YOLO necks
 │   │   ├── head/                    # E2E dual head, YOLO/YOLOX heads
-│   │   ├── layers/                  # Conv, reparameterization, micro and YOLO blocks
+│   │   ├── layers/                  # Conv, reparameterization, micro/YOLO blocks
 │   │   ├── assignment/              # STAL
 │   │   ├── detector.py              # build_model() factory
 │   │   └── lora.py                  # LoRA / QLoRA variants
@@ -429,60 +552,43 @@ FlashDet/
 └── pyproject.toml                   # Package configuration
 ```
 
----
-
-## Docker
-
-```bash
-# Build
-docker build -t flashdet -f docker/Dockerfile .
-
-# Run inference
-docker run --gpus all -v $(pwd)/data:/app/data flashdet \
-  predict --model best.pth --source data/test.jpg
-
-# Or use docker-compose
-cd docker && docker compose up
-```
-
----
-
-## Supported Formats
-
-| Import | Export |
-|---|---|
-| COCO JSON | ONNX |
-| TXT labels | FP16 weights |
-| Pascal VOC XML | TorchScript |
+</details>
 
 ---
 
 ## Documentation
 
-Full documentation is in the [`docs/`](docs/) folder:
-
-| Document | Description |
+| Document | What you will find |
 |---|---|
-| [Installation](docs/Installation.md) | Detailed installation guide |
-| [LoRA Fine-Tuning](docs/LoRA-Fine-Tuning.md) | LoRA/QLoRA variants and usage |
+| [Installation](docs/Installation.md) | Detailed install and environment setup |
+| [Pico-Zoo](docs/Pico-Zoo.md) | All 40 backbones, necks and selection guide |
+| [LoRA Fine-Tuning](docs/LoRA-Fine-Tuning.md) | LoRA / QLoRA variants and usage |
 | [Trackers](docs/Trackers.md) | Multi-object tracking guide |
-| [FAQ](docs/FAQ.md) | Frequently asked questions |
+| [Testing](tests/TESTING.md) | Unit, integration and TDD workflow |
+| [Security Audit](docs/SECURITY-AUDIT.md) | Pen-test findings and hardening notes |
+| [Load Test](docs/LOAD-TEST.md) | Concurrency results and serving recommendations |
+| [Hardcoding Audit](docs/HARDCODING-AUDIT.md) | Configuration cleanup notes |
+| [FAQ](docs/FAQ.md) | Common questions |
 | [Changelog](docs/CHANGELOG.md) | Version history |
 
 ---
 
 ## Contributing
 
-We welcome contributions!
-
 ```bash
 git clone https://github.com/FlashVision/FlashDet.git
 cd FlashDet
 pip install -e ".[dev,all]"
-pytest tests/
-ruff check flashdet/
-flashdet check
+make test
+make lint
 ```
+
+Before opening a pull request:
+
+1. Add or update a test for your change.
+2. Run `make test` and `make lint`.
+3. Keep changes focused; one feature per PR.
+4. Update the relevant doc in `docs/` if behaviour changes.
 
 ---
 
@@ -493,8 +599,6 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  <a href="https://github.com/FlashVision/FlashDet">
-    <b>FlashVision</b>
-  </a>
+  <a href="https://github.com/FlashVision/FlashDet"><b>FlashVision</b></a>
   — Open-source lightweight AI
 </p>
