@@ -29,6 +29,7 @@ def build_model_from_checkpoint(model_path: str, fuse: bool = True) -> torch.nn.
     from flashdet.utils.checkpoint import safe_torch_load
 
     ckpt = safe_torch_load(model_path, map_location="cpu")
+    already_fused = False
     if isinstance(ckpt, torch.nn.Module):
         module = ckpt
     else:
@@ -63,10 +64,18 @@ def build_model_from_checkpoint(model_path: str, fuse: bool = True) -> torch.nn.
 
         module = build_model(config, architecture=arch)
         state_dict = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt))
+        fusion = ckpt.get("fusion") or {}
+        if fusion.get("passes"):
+            # Checkpoint produced by `flashdet fuse`: replay the same passes
+            # to recreate the fused module paths, then load the tensors.
+            from flashdet.fusing.checkpoint import apply_fusion_manifest
+            module = apply_fusion_manifest(
+                module, fusion, default_size=input_size or 320)
+            already_fused = True
         module.load_state_dict(state_dict, strict=False)
 
     module.eval()
-    if fuse:
+    if fuse and not already_fused:
         raw = module.module if hasattr(module, "module") else module
         if hasattr(raw, "fuse"):
             try:

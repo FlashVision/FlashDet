@@ -363,6 +363,49 @@ def cmd_export(args):
                 print(f"  INT8 parity skipped: {exc}")
 
 
+def cmd_fuse(args):
+    """Fuse layers/kernels for deployment and report parity."""
+    import torch
+    from flashdet.deployment import (
+        build_model_from_checkpoint,
+        input_size_from_checkpoint,
+    )
+    from flashdet.fusing import default_passes, run_fusions
+    from flashdet.utils.checkpoint import safe_torch_load
+
+    model = build_model_from_checkpoint(args.model, fuse=False)
+    size = args.input_size or input_size_from_checkpoint(args.model)
+    probe = torch.randn(1, 3, size, size)
+
+    passes = default_passes(example_input=probe)
+    if args.no_rep:
+        passes = [p for p in passes if p.name != "rep_fusion"]
+
+    fused, report = run_fusions(
+        model, passes, example_input=probe, verify=not args.no_verify)
+
+    print(f"Fusing: {args.model} (input {size}x{size})")
+    print(report)
+    if args.no_verify:
+        print("  parity: skipped (--no-verify)")
+    elif not report.parity_ok:
+        print("  warning: fused output differs from the original — inspect "
+              "the report before deploying")
+
+    if args.output:
+        raw = safe_torch_load(args.model, map_location="cpu")
+        config = raw.get("config", {}) if isinstance(raw, dict) else {}
+        if not config:
+            print("  warning: checkpoint has no config; the saved fused file "
+                  "may not rebuild correctly")
+        from flashdet.fusing.checkpoint import save_fused_checkpoint
+        path = save_fused_checkpoint(
+            fused, args.output, config=config or {},
+            input_size=size, report=report,
+        )
+        print(f"Fused checkpoint: {path}")
+
+
 def cmd_weights(args):
     """List / download registered demo checkpoints."""
     from flashdet.hub import list_weights, WEIGHTS, download_weights
@@ -401,6 +444,7 @@ Examples:
   flashdet train --train-images data/train --val-images data/val
   flashdet train --config configs/flashdet_n_320_coco.yaml
   flashdet train --config configs/yolov10_s_640_coco.yaml
+  flashdet fuse --model weights/flashdet_p.pth --output fused.pth
 
 Documentation: https://github.com/FlashVision/FlashDet
 """,
@@ -498,6 +542,19 @@ Documentation: https://github.com/FlashVision/FlashDet
     exp_p.add_argument("--calib-batches", type=int, default=16,
                        help="Calibration batches consumed (default: 16)")
 
+    # fuse
+    fuse_p = subparsers.add_parser(
+        "fuse", help="Fuse layers/kernels for deployment (with parity check)")
+    fuse_p.add_argument("--model", required=True, help="Path to .pth checkpoint")
+    fuse_p.add_argument("--input-size", type=int, default=None,
+                        help="Probe input size (default: from checkpoint config)")
+    fuse_p.add_argument("--output", default=None,
+                        help="Save the fused model as a replayable checkpoint")
+    fuse_p.add_argument("--no-rep", action="store_true",
+                        help="Skip structural reparameterization (rep blocks)")
+    fuse_p.add_argument("--no-verify", dest="no_verify", action="store_true",
+                        help="Skip the numeric parity verification")
+
     # weights
     w_p = subparsers.add_parser("weights", help="List or download ready-to-use checkpoints")
     w_p.add_argument("--list", action="store_true", help="List available checkpoints")
@@ -539,6 +596,7 @@ Documentation: https://github.com/FlashVision/FlashDet
         "predict": cmd_predict,
         "val": cmd_val,
         "export": cmd_export,
+        "fuse": cmd_fuse,
         "benchmark": cmd_benchmark,
         "weights": cmd_weights,
     }

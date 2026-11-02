@@ -5,6 +5,11 @@ All notable changes to FlashDet will be documented in this file.
 ## [1.3.0] — 2026-11-02
 
 ### Added
+- **Fusion toolkit** — `flashdet/fusing/` with composable layer, kernel and
+  graph passes: structural reparameterization, conv-BN-activation triples
+  collapsed into one module, BatchNorm folded into conv/Linear weights, and
+  stacked Linear merging. `flashdet fuse` reports the change and verifies
+  numeric parity; fused models are saved as plain, replayable state dicts.
 - **Pico-Zoo backbones** — `FlashDet-P` now accepts all 40 architecture names from the Pico model table via `--backbone` / `backbone_type` (`repvit`, `mobileone`, `edgenext`, `mambaout`, `pp_lcnet`, `convnextv2`, ...).
 - **Pico-Zoo necks** — matching lightweight PAN neck families (`rep`, `ghost`, `attention`, `mamba`, `lcnet`) selected automatically or with `--neck`.
 - `scripts/train_pico_zoo.sh` for Pico backbone/neck experiments.

@@ -178,11 +178,14 @@ class PicoZooNeck(nn.Module):
                     feat_high, size=feat_low.shape[2:],
                     mode="bilinear", align_corners=False,
                 )
-            if upsample_feat.shape[2:] != feat_low.shape[2:]:
-                upsample_feat = F.interpolate(
-                    upsample_feat, size=feat_low.shape[2:],
-                    mode="bilinear", align_corners=False,
-                )
+            # Always size-match the low-resolution feature. This is a no-op
+            # when the shapes already agree, and keeping it unconditional lets
+            # torch.fx trace the forward without data-dependent control flow
+            # (needed for graph fusion and export).
+            upsample_feat = F.interpolate(
+                upsample_feat, size=feat_low.shape[2:],
+                mode="bilinear", align_corners=False,
+            )
 
             inner_out = self.top_down_blocks[up_idx](
                 torch.cat([upsample_feat, feat_low], dim=1)

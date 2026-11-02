@@ -305,6 +305,46 @@ as validation. Do not add another normalization step.
 
 ---
 
+## Fusion
+
+The fusing package is under `flashdet/fusing`. Passes fold redundant work out
+of a trained model before deployment and report what changed:
+
+```python
+import torch
+from flashdet.fusing import run_fusions, default_passes
+
+probe = torch.randn(1, 3, 320, 320)
+fused, report = run_fusions(model, default_passes(example_input=probe),
+                            example_input=probe)
+print(report)
+```
+
+| Pass | What it does |
+|---|---|
+| `rep_fusion` | Collapses multi-branch reparameterizable blocks into single convolutions |
+| `conv_bn_act` | Replaces `conv -> BN -> activation` triples with one module call |
+| `conv_bn`, `linear_bn` | Folds BatchNorm into the preceding conv / Linear weights |
+| `linear_pair` | Merges stacked Linear projections into one matrix multiply |
+
+`run_fusions` deep-copies the model, applies the passes, and compares the fused
+forward against the original. A pass only rewrites a module attribute when the
+traced graph uses it at exactly one call site, so shared modules (for example
+one activation applied in two branches) are left untouched.
+
+```bash
+flashdet fuse --model best.pth                      # report + parity check
+flashdet fuse --model best.pth --output fused.pth   # save a replayable checkpoint
+```
+
+Fused checkpoints are ordinary state dicts (no pickled modules), so they load
+through the normal safe checkpoint path and work with `export`, `benchmark`,
+`val` and `predict`. On the demo checkpoint, fusion collapses 20
+reparameterizable blocks and 47 conv-BN-activation triples with max|Δ| ≈ 8e-5
+against the unfused model.
+
+---
+
 ## Quantization
 
 The quantization package is under `flashdet/quantization`.
@@ -391,6 +431,7 @@ flashdet/
 │   ├── assignment/      # STAL
 │   └── lora.py          # LoRA / QLoRA
 ├── losses/
+├── fusing/              # layer, kernel and graph fusion passes
 ├── quantization/        # static, AWQ, GPTQ, dynamic, QAT
 ├── trackers/
 ├── solutions/

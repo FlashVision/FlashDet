@@ -352,11 +352,14 @@ class PicoNeck(nn.Module):
 
             up_idx = len(self.in_channels) - 1 - idx
             upsample_feat = self.upsamplers[up_idx](feat_high)
-            if upsample_feat.shape[2:] != feat_low.shape[2:]:
-                upsample_feat = F.interpolate(
-                    upsample_feat, size=feat_low.shape[2:],
-                    mode="bilinear", align_corners=False,
-                )
+            # Always size-match the low-resolution feature. When the shapes
+            # already agree this is numerically a no-op, and keeping it
+            # unconditional lets torch.fx trace the forward without
+            # data-dependent control flow (needed for graph fusion/export).
+            upsample_feat = F.interpolate(
+                upsample_feat, size=feat_low.shape[2:],
+                mode="bilinear", align_corners=False,
+            )
 
             inner_out = self.top_down_blocks[up_idx](
                 torch.cat([upsample_feat, feat_low], dim=1)
