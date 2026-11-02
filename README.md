@@ -299,6 +299,9 @@ Common options:
 | `--multi-gpu` | DDP / DataParallel training |
 | `--mosaic`, `--mixup` | Stronger augmentation |
 | `--multi-scale` | Random input sizes during training |
+| `--channels-last` | Faster CNN memory format |
+| `--tf32` | Faster CUDA matmul (slight precision trade) |
+| `--cudnn-benchmark` | cuDNN autotuning for fixed shapes |
 | `--resume checkpoint.pth` | Resume training |
 | `--finetune checkpoint.pth` | Warm-start from weights |
 | `--config config.yaml` | Load model/data/train settings from YAML |
@@ -617,7 +620,8 @@ FlashDet/
 | [Training Matrix](docs/TRAINING-MATRIX.md) | 1,000-image / 10-class run across all model sizes |
 | [Hardcoding Audit](docs/HARDCODING-AUDIT.md) | Configuration cleanup notes |
 | [FAQ](docs/FAQ.md) | Common questions |
-| [Quantization](docs/QUANTIZATION.md) | Static, dynamic, QAT and layer-aware INT8 |
+| [Quantization](docs/QUANTIZATION.md) | Static, AWQ, GPTQ, dynamic, QAT and layer-aware INT8 |
+| [Performance](docs/PERFORMANCE.md) | Channels-last, TF32, fused optimizers and stability |
 | [Publishing](docs/PUBLISHING.md) | Auto-publish GitHub → PyPI |
 | [Changelog](docs/CHANGELOG.md) | Version history |
 

@@ -57,6 +57,9 @@ All notable changes to FlashDet will be documented in this file.
   and early stopping is broadcast to all ranks.
 - **Checkpoints** — strip `torch.compile` prefixes and training-only heads from
   inference weights.
+- **Training performance** — opt-in channels-last, TF32 and cuDNN autotuning;
+  fused/foreach optimizers, non-blocking copies and `set_to_none`; full-set
+  validation on DDP rank 0.
 - **CLI validation** — `flashdet val` now derives `_annotations.coco.json`,
   prints mAP/per-class AP, and defaults to the same 0.01 score threshold used
   during training validation.

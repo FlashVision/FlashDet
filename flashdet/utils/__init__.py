@@ -9,6 +9,13 @@ from .checkpoint import (
     load_inference_model,
 )
 from .logger import setup_logger, AverageMeter
+from .performance import (
+    configure_performance,
+    make_adamw,
+    make_sgd,
+    prepare_images,
+    to_channels_last,
+)
 from .bbox import make_anchor_grid, decode_ltrb, bbox_iou_aligned, decode_batch_nms_free
 from .torchtune_optim import (
     apply_activation_checkpointing,
@@ -24,6 +31,8 @@ __all__ = [
     "save_checkpoint", "load_checkpoint", "save_weights_only", "save_inference_weights",
     "safe_torch_load", "load_inference_model",
     "setup_logger", "AverageMeter",
+    "configure_performance", "to_channels_last", "prepare_images",
+    "make_adamw", "make_sgd",
     "make_anchor_grid", "decode_ltrb", "bbox_iou_aligned", "decode_batch_nms_free",
     "apply_activation_checkpointing", "ActivationOffloadHook",
     "create_optimizer", "compile_model", "log_memory_stats",

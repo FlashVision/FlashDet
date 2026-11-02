@@ -100,6 +100,7 @@ class TrainConfig:
     base_momentum: float = 0.937
     warmup_min_iters: int = 100
     multi_scale: bool = False
+    channels_last: bool = False
     multi_scale_sizes: List[int] = field(
         default_factory=lambda: [256, 288, 320, 352, 384, 416]
     )

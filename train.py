@@ -29,7 +29,8 @@ from flashdet.models.lora import apply_lora, apply_qlora, merge_lora_weights, ge
 from flashdet.data import create_dataloader, verify_dataset, verify_training_data
 from flashdet.utils import (
     save_checkpoint, load_checkpoint, save_inference_weights, setup_logger,
-    AverageMeter, safe_torch_load,
+    AverageMeter, safe_torch_load, configure_performance, make_adamw,
+    make_sgd, prepare_images, to_channels_last,
 )
 from flashdet.utils.metrics import compute_map
 from flashdet.utils.torchtune_optim import (
@@ -326,7 +327,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
     current_ms_size = None
 
     for batch_idx, (images, gt_meta) in enumerate(dataloader):
-        images = images.to(device)
+        images = prepare_images(images, device, getattr(config.train, "channels_last", False))
 
         # Multi-scale resize every 10 batches (when enabled)
         if multi_scale_sizes and batch_idx % 10 == 0:
@@ -380,7 +381,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
             else:
                 torch.nn.utils.clip_grad_norm_(raw_model.parameters(), grad_clip_norm)
                 optimizer.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             if ema is not None:
                 ema.update(raw_model)
@@ -447,7 +448,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
 
 @torch.no_grad()
 def validate(model, dataloader, device, logger, ema=None, class_names=None,
-             epoch=0, total_epochs=100, score_thr=0.01, max_det=300):
+             epoch=0, total_epochs=100, score_thr=0.01, max_det=300,
+             channels_last=False):
     """
     Validate model — computes both loss and mAP@0.5.
 
@@ -469,7 +471,7 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None,
     all_gts   = []
 
     for images, gt_meta in dataloader:
-        images = images.to(device)
+        images = prepare_images(images, device, channels_last)
 
         out = eval_model(images, gt_meta, epoch=epoch, compute_loss=True)
 
@@ -623,6 +625,14 @@ def main():
                        metavar=("D0", "D1", "D2"),
                        help="Override Pico backbone stage depths (default: architecture preset)")
 
+    perf = parser.add_argument_group("performance")
+    perf.add_argument("--channels-last", action="store_true",
+                      help="Use channels-last memory format (faster CNN on many CPUs/GPUs)")
+    perf.add_argument("--tf32", action="store_true",
+                      help="Enable TF32 matmul on CUDA (faster, slightly lower precision)")
+    perf.add_argument("--cudnn-benchmark", action="store_true",
+                      help="Enable cuDNN autotuning (fastest for fixed input sizes)")
+
     # --- torchtune-inspired training optimizations ---
     tt_group = parser.add_argument_group("torchtune optimizations",
                                           "Memory & performance techniques from torchtune")
@@ -739,6 +749,12 @@ def main():
                 requested_device,
             )
     
+    configure_performance(
+        device,
+        tf32=getattr(args, "tf32", False),
+        cudnn_benchmark=getattr(args, "cudnn_benchmark", False),
+    )
+
     config = yaml_cfg if yaml_cfg is not None else get_config()
 
     # Keep the resolved model/input values in sync with CLI/config.
@@ -759,6 +775,7 @@ def main():
         value = getattr(args, arg_name, None)
         if value is not None:
             setattr(config.train, cfg_name, value)
+    config.train.channels_last = bool(getattr(args, "channels_last", False))
     if getattr(args, "multi_scale", False):
         config.train.multi_scale = True
     if args.multi_scale_sizes is not None:
@@ -936,6 +953,10 @@ def main():
         logger.info(f"Architecture: {arch}")
         logger.info(f"Total params: {total_params:,} | Trainable: {trainable:,}")
 
+    if args.channels_last:
+        model = to_channels_last(model)
+        logger.info("Memory format: channels_last")
+
     # (FlashDet uses Kaiming init; pretrained backbone no longer needed)
 
     # --- torchtune: LoRA / QLoRA (apply before loading finetune/COCO weights) ---
@@ -1069,7 +1090,7 @@ def main():
         logger.info(f"Weight decay auto-adjusted to {wd} for SGD-family optimizer")
     if opt_type == "adamw" and not args.optimizer_in_bwd:
         logger.info(f"Optimizer: AdamW (lr={base_lr:.6f}, wd={wd})")
-        optimizer = torch.optim.AdamW(
+        optimizer = make_adamw(
             raw_model.parameters(),
             lr=base_lr,
             betas=(0.9, 0.999),
@@ -1085,7 +1106,7 @@ def main():
         )
     elif opt_type == "sgd" and not args.optimizer_in_bwd:
         logger.info("Optimizer: SGD")
-        optimizer = torch.optim.SGD(
+        optimizer = make_sgd(
             raw_model.parameters(),
             lr=base_lr,
             momentum=0.9,
@@ -1315,6 +1336,7 @@ def main():
                 epoch=epoch, total_epochs=args.epochs,
                 score_thr=getattr(config.train, "val_score_thr", 0.01),
                 max_det=getattr(config.train, "max_det", 300),
+                channels_last=getattr(config.train, "channels_last", False),
             )
 
             # Record validation metrics to history
