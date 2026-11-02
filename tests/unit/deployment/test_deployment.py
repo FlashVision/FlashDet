@@ -10,6 +10,7 @@ import torch
 
 pytest.importorskip("onnx")
 pytest.importorskip("onnxruntime")
+pytest.importorskip("onnxscript")
 
 from flashdet.deployment.onnx_export import export_onnx
 from flashdet.deployment.parity import check_parity, detection_parity

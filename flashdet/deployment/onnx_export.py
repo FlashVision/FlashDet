@@ -153,6 +153,13 @@ def _export_file(wrapper, dummy, output_path: str, opset: int,
             env["use_external_data_format"] = False
     try:
         torch.onnx.export(wrapper, dummy, output_path, **env)
+    except ModuleNotFoundError as exc:
+        if "onnxscript" in str(exc):
+            raise ImportError(
+                "The ONNX dynamo exporter requires onnxscript. Install it "
+                "with: pip install 'flashdet[export]'"
+            ) from exc
+        raise
     except TypeError:
         for key in list(env):
             if key in ("external_data", "use_external_data_format"):
