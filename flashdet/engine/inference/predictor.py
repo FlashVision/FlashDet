@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from flashdet.models.detector import build_model
+from flashdet.utils.checkpoint import safe_torch_load
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +37,14 @@ class Predictor:
         device: str = "cuda",
         conf_thresh: float = 0.35,
         nms_thresh: float = 0.5,
-        input_size: int = 640,
+        input_size: Optional[int] = None,
         class_names: Optional[List[str]] = None,
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.conf_thresh = conf_thresh
         self.nms_thresh = nms_thresh
-        self.input_size = input_size
+        # The checkpoint config overrides this when one is available.
+        self.input_size = int(input_size) if input_size else 320
         self.class_names = class_names
 
         if model is not None:
@@ -55,14 +57,18 @@ class Predictor:
 
     def _load_model(self, model_path: str):
         """Load model from checkpoint."""
-        ckpt = torch.load(model_path, map_location=self.device, weights_only=False)
+        ckpt = safe_torch_load(model_path, map_location=self.device)
 
+        backbone_type = "lite"
+        neck_type = None
         if "config" in ckpt:
             cfg = ckpt["config"]
             arch = cfg.get("architecture", "flashdet")
             num_classes = cfg.get("num_classes", 80)
             model_size = cfg.get("model_size", "n")
             input_size = cfg.get("input_size", self.input_size)
+            backbone_type = cfg.get("backbone_type") or "lite"
+            neck_type = cfg.get("neck_type")
             if isinstance(input_size, (list, tuple)):
                 input_size = input_size[0]
             self.input_size = input_size
@@ -71,10 +77,19 @@ class Predictor:
             num_classes = 80
             model_size = "n"
 
+        state_dict = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt))
+        # Backwards compatibility for old Pico-v2 checkpoints.
+        if backbone_type == "lite" and isinstance(state_dict, dict):
+            if any(k.startswith("backbone.stem.") or k.startswith("backbone.stages.")
+                   for k in state_dict):
+                backbone_type = "repnext"
+
         from flashdet.cfg import get_config
         config = get_config(num_classes=num_classes)
         config.model.architecture = arch
         config.model.size = model_size
+        config.model.backbone_type = backbone_type
+        config.model.neck_type = neck_type
 
         if arch in ("yolov8", "yolov9", "yolov10", "yolov11", "yolox"):
             config.model.width_mult = ckpt.get("config", {}).get("width_mult", 1.0)
@@ -82,7 +97,6 @@ class Predictor:
 
         model = build_model(config, architecture=arch)
 
-        state_dict = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt))
         if isinstance(state_dict, dict) and not any(k.startswith("backbone") or k.startswith("stem") for k in state_dict):
             state_dict = ckpt
         model.load_state_dict(state_dict, strict=False)
@@ -96,11 +110,37 @@ class Predictor:
 
         return model, num_classes
 
+    # Reject decompression-bomb style inputs before resizing.  The model itself
+    # is fixed-size, so a gigantic source image only wastes memory/CPU.
+    MAX_INPUT_PIXELS = 64_000_000  # ~8000 x 8000
+
     def preprocess(self, image: np.ndarray) -> Tuple[torch.Tensor, float, Tuple[int, int]]:
-        """Resize and normalize image for inference."""
+        """Validate, resize and normalize an image for inference."""
+        if not isinstance(image, np.ndarray):
+            raise TypeError(
+                f"Expected a numpy image array, got {type(image).__name__}"
+            )
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.ndim == 3 and image.shape[2] == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError(
+                f"Expected an HxWx3 BGR image, got shape {image.shape}"
+            )
         h, w = image.shape[:2]
+        if h <= 0 or w <= 0:
+            raise ValueError(f"Image has invalid dimensions: {image.shape}")
+        if h * w > self.MAX_INPUT_PIXELS:
+            raise ValueError(
+                f"Image is too large ({w}x{h}); max is "
+                f"{self.MAX_INPUT_PIXELS} pixels"
+            )
+        if image.dtype != np.uint8:
+            image = np.clip(image, 0, 255).astype(np.uint8)
+
         scale = min(self.input_size / h, self.input_size / w)
-        new_h, new_w = int(h * scale), int(w * scale)
+        new_h, new_w = max(1, int(h * scale)), max(1, int(w * scale))
         resized = cv2.resize(image, (new_w, new_h))
 
         padded = np.full((self.input_size, self.input_size, 3), 114, dtype=np.uint8)

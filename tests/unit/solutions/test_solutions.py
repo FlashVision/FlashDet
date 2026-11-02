@@ -1,9 +1,8 @@
 """Tests for all FlashDet solutions — process_frame interface contract."""
 
 import numpy as np
-import pytest
 
-from flashdet.solutions._base import BaseSolution, run_detector
+from flashdet.solutions._base import run_detector
 
 
 class MockPredictor:
@@ -26,27 +25,36 @@ class TestRunDetector:
 
     def test_numpy_array_passthrough(self):
         dets = np.array([[10, 10, 50, 50, 0.9, 0, 0.1]], dtype=np.float64)
-        predictor = lambda f: dets
+
+        def predictor(_frame):
+            return dets
+
         result = run_detector(predictor, np.zeros((100, 100, 3), dtype=np.uint8))
         assert result.shape == (1, 6)
 
     def test_list_of_tuples_format(self):
-        predictor = lambda f: [
-            (np.array([10, 10, 50, 50]), 0.9, 0),
-            (np.array([60, 60, 100, 100]), 0.8, 1),
-        ]
+        def predictor(_frame):
+            return [
+                (np.array([10, 10, 50, 50]), 0.9, 0),
+                (np.array([60, 60, 100, 100]), 0.8, 1),
+            ]
+
         result = run_detector(predictor, np.zeros((100, 100, 3), dtype=np.uint8))
         assert result.shape == (2, 6)
 
     def test_list_of_dicts_format(self):
-        predictor = lambda f: [
-            {"bbox": [10, 10, 50, 50], "confidence": 0.9, "class_id": 0},
-        ]
+        def predictor(_frame):
+            return [
+                {"bbox": [10, 10, 50, 50], "confidence": 0.9, "class_id": 0},
+            ]
+
         result = run_detector(predictor, np.zeros((100, 100, 3), dtype=np.uint8))
         assert result.shape == (1, 6)
 
     def test_empty_list(self):
-        predictor = lambda f: []
+        def predictor(_frame):
+            return []
+
         result = run_detector(predictor, np.zeros((100, 100, 3), dtype=np.uint8))
         assert result.shape == (0, 6)
 

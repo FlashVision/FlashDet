@@ -30,9 +30,9 @@ DATASET_REGISTRY: Dict[str, dict] = {
         "name": "COCO 2017",
         "description": "Microsoft COCO: 118K train, 5K val images, 80 classes",
         "urls": {
-            "train_images": "http://images.cocodataset.org/zips/train2017.zip",
-            "val_images": "http://images.cocodataset.org/zips/val2017.zip",
-            "train_annotations": "http://images.cocodataset.org/annotations/annotations_trainval2017.zip",
+            "train_images": "https://images.cocodataset.org/zips/train2017.zip",
+            "val_images": "https://images.cocodataset.org/zips/val2017.zip",
+            "train_annotations": "https://images.cocodataset.org/annotations/annotations_trainval2017.zip",
         },
         "format": "coco",
         "classes": 80,
@@ -42,8 +42,8 @@ DATASET_REGISTRY: Dict[str, dict] = {
         "name": "COCO 2017 (val only)",
         "description": "COCO 2017 validation set only — 5K images, 80 classes (quick testing)",
         "urls": {
-            "val_images": "http://images.cocodataset.org/zips/val2017.zip",
-            "annotations": "http://images.cocodataset.org/annotations/annotations_trainval2017.zip",
+            "val_images": "https://images.cocodataset.org/zips/val2017.zip",
+            "annotations": "https://images.cocodataset.org/annotations/annotations_trainval2017.zip",
         },
         "format": "coco",
         "classes": 80,
@@ -53,8 +53,8 @@ DATASET_REGISTRY: Dict[str, dict] = {
         "name": "Pascal VOC 2007",
         "description": "Pascal VOC 2007: 5K train/val + 5K test, 20 classes",
         "urls": {
-            "trainval": "http://host.robots.ox.ac.uk/pascal/VOC/voc2007/VOCtrainval_06-Nov-2007.tar",
-            "test": "http://host.robots.ox.ac.uk/pascal/VOC/voc2007/VOCtest_06-Nov-2007.tar",
+            "trainval": "https://host.robots.ox.ac.uk/pascal/VOC/voc2007/VOCtrainval_06-Nov-2007.tar",
+            "test": "https://host.robots.ox.ac.uk/pascal/VOC/voc2007/VOCtest_06-Nov-2007.tar",
         },
         "format": "voc",
         "classes": 20,
@@ -64,7 +64,7 @@ DATASET_REGISTRY: Dict[str, dict] = {
         "name": "Pascal VOC 2012",
         "description": "Pascal VOC 2012: 11.5K train/val, 20 classes",
         "urls": {
-            "trainval": "http://host.robots.ox.ac.uk/pascal/VOC/voc2012/VOCtrainval_11-May-2012.tar",
+            "trainval": "https://host.robots.ox.ac.uk/pascal/VOC/voc2012/VOCtrainval_11-May-2012.tar",
         },
         "format": "voc",
         "classes": 20,
@@ -74,8 +74,8 @@ DATASET_REGISTRY: Dict[str, dict] = {
         "name": "Sample Dataset",
         "description": "Tiny 50-image sample from COCO val for quick smoke tests",
         "urls": {
-            "val_images": "http://images.cocodataset.org/zips/val2017.zip",
-            "annotations": "http://images.cocodataset.org/annotations/annotations_trainval2017.zip",
+            "val_images": "https://images.cocodataset.org/zips/val2017.zip",
+            "annotations": "https://images.cocodataset.org/annotations/annotations_trainval2017.zip",
         },
         "format": "coco",
         "classes": 80,
@@ -133,17 +133,49 @@ def _download_file(url: str, dest: str, desc: str = "Downloading") -> str:
     return dest
 
 
+def _safe_target(dest_dir: str, member_name: str) -> str:
+    """Resolve an archive member path and reject path traversal."""
+    base = os.path.realpath(dest_dir)
+    target = os.path.realpath(os.path.join(base, member_name))
+    if os.path.commonpath([base, target]) != base:
+        raise ValueError(
+            f"Refusing unsafe archive member outside {dest_dir!r}: {member_name!r}"
+        )
+    return target
+
+
 def _extract(archive_path: str, dest_dir: str) -> None:
-    """Extract a .zip or .tar/.tar.gz archive."""
+    """Extract a .zip or .tar/.tar.gz archive without path traversal."""
     logger.info("Extracting %s ...", os.path.basename(archive_path))
     os.makedirs(dest_dir, exist_ok=True)
 
     if archive_path.endswith(".zip"):
         with zipfile.ZipFile(archive_path, "r") as zf:
+            for info in zf.infolist():
+                _safe_target(dest_dir, info.filename)
             zf.extractall(dest_dir)
     elif archive_path.endswith((".tar", ".tar.gz", ".tgz")):
         with tarfile.open(archive_path, "r:*") as tf:
-            tf.extractall(dest_dir)
+            members = tf.getmembers()
+            for member in members:
+                _safe_target(dest_dir, member.name)
+                if member.issym() or member.islnk():
+                    link_target = os.path.realpath(
+                        os.path.join(os.path.dirname(
+                            os.path.join(dest_dir, member.name)
+                        ), member.linkname)
+                    )
+                    base = os.path.realpath(dest_dir)
+                    if os.path.commonpath([base, link_target]) != base:
+                        raise ValueError(
+                            "Refusing archive link outside extraction directory: "
+                            f"{member.name!r} -> {member.linkname!r}"
+                        )
+            # Python 3.12+ supports the hardened "data" filter.
+            try:
+                tf.extractall(dest_dir, filter="data")
+            except TypeError:
+                tf.extractall(dest_dir)
     else:
         raise ValueError(f"Unknown archive format: {archive_path}")
 

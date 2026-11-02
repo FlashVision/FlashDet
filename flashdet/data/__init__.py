@@ -14,6 +14,7 @@ from .prepare import (
     summarize_coco_root,
 )
 from .download import download_dataset, list_datasets, DATASET_REGISTRY
+from .demo import create_demo_dataset, DEMO_CLASSES
 from .verify_annotations import verify_training_data
 
 __all__ = [
@@ -39,5 +40,7 @@ __all__ = [
     "download_dataset",
     "list_datasets",
     "DATASET_REGISTRY",
+    "create_demo_dataset",
+    "DEMO_CLASSES",
     "verify_training_data",
 ]

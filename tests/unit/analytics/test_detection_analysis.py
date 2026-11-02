@@ -1,7 +1,6 @@
 """Tests for DetectionErrorAnalyzer — TIDE-style error categorization."""
 
 import numpy as np
-import pytest
 
 from flashdet.analytics.detection_analysis import DetectionErrorAnalyzer
 

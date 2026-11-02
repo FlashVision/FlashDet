@@ -1,6 +1,7 @@
 """FlashDet CLI — command-line interface for training, validation, prediction, export, and dataset download."""
 
 import argparse
+import os
 import sys
 
 
@@ -101,12 +102,13 @@ def cmd_check(args):
         import torch
         from flashdet.cfg import get_config
         from flashdet.models import build_model
-        cfg = get_config(model_size="m", input_size=320, num_classes=80)
+        cfg = get_config(model_size="m")
         model = build_model(cfg)
         model.eval()
+        size = int(cfg.model.input_size[0])
         with torch.no_grad():
-            model(torch.randn(1, 3, 320, 320))
-        print(f"  {_colored('✓', 'green')} model forward pass (FlashDet-m, 320px)")
+            model(torch.randn(1, 3, size, size))
+        print(f"  {_colored('✓', 'green')} model forward pass (FlashDet-m, {size}px)")
     except Exception as e:
         print(f"  {_colored('✗', 'red')} model forward pass: {e}")
         errors.append(str(e))
@@ -188,6 +190,8 @@ def cmd_train(args):
             "train_images": args.train_images,
             "val_images": args.val_images,
             "save_dir": args.save_dir,
+            "backbone_type": getattr(args, "backbone", "lite"),
+            "neck_type": getattr(args, "neck", None),
         }
         if args.lora:
             kwargs["lora"] = True
@@ -273,21 +277,34 @@ def cmd_export(args):
     from flashdet.models.detector import build_model
     from flashdet.cfg import get_config
 
-    model_path = args.model
-    output_path = args.output or model_path.replace(".pth", ".onnx")
+    from flashdet.utils.checkpoint import safe_torch_load
 
-    ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+    model_path = args.model
+    output_path = args.output or os.path.splitext(model_path)[0] + ".onnx"
+
+    ckpt = safe_torch_load(model_path, map_location="cpu")
     cfg_data = ckpt.get("config", {})
     arch = cfg_data.get("architecture", "flashdet")
     num_classes = cfg_data.get("num_classes", 80)
     model_size = cfg_data.get("model_size", "n")
-    input_size = cfg_data.get("input_size", 640)
+    input_size = cfg_data.get("input_size")
     if isinstance(input_size, (list, tuple)):
         input_size = input_size[0]
 
     config = get_config(num_classes=num_classes)
     config.model.architecture = arch
     config.model.size = model_size
+    input_size = int(input_size or config.model.input_size[0])
+    # Pico selectors (required for the new backbone/neck zoo).
+    config.model.backbone_type = cfg_data.get("backbone_type") or "lite"
+    config.model.neck_type = cfg_data.get("neck_type")
+    if arch == "flashdet" and config.model.backbone_type == "lite":
+        peek = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt))
+        if isinstance(peek, dict) and any(
+            k.startswith("backbone.stem.") or k.startswith("backbone.stages.")
+            for k in peek
+        ):
+            config.model.backbone_type = "repnext"
     if arch in ("yolov8", "yolov9", "yolov10", "yolov11"):
         config.model.width_mult = cfg_data.get("width_mult", 1.0)
         config.model.depth_mult = cfg_data.get("depth_mult", 1.0)
@@ -377,6 +394,10 @@ Documentation: https://github.com/FlashVision/FlashDet
     train_p.add_argument("--architecture", default="flashdet",
                          choices=["flashdet", "yolov8", "yolov9", "yolov10", "yolov11", "yolox"],
                          help="Detection architecture (default: flashdet)")
+    train_p.add_argument("--backbone", default=None,
+                         help="Pico backbone (lite, pico_v2, or any Pico-Zoo name such as repvit/edgenext/mambaout)")
+    train_p.add_argument("--neck", default=None,
+                         help="Pico neck family (pan, rep, ghost, attention, mamba, lcnet) or a backbone name")
     train_p.add_argument("--epochs", type=int, default=100, help="Training epochs (default: 100)")
     train_p.add_argument("--batch-size", type=int, default=32, help="Batch size (default: 32)")
     train_p.add_argument("--lr", type=float, default=None, help="Learning rate")
@@ -400,7 +421,8 @@ Documentation: https://github.com/FlashVision/FlashDet
     pred_p.add_argument("--source", required=True, help="Image path, video path, or directory")
     pred_p.add_argument("--conf", type=float, default=0.25, help="Confidence threshold (default: 0.25)")
     pred_p.add_argument("--nms", type=float, default=0.5, help="NMS IoU threshold (default: 0.5)")
-    pred_p.add_argument("--input-size", type=int, default=640, help="Input size (default: 640)")
+    pred_p.add_argument("--input-size", type=int, default=None,
+                        help="Input size (default: from checkpoint config)")
     pred_p.add_argument("--device", default="cuda", help="Device (default: cuda)")
     pred_p.add_argument("--output", default=None, help="Output directory for annotated results")
 
@@ -411,7 +433,8 @@ Documentation: https://github.com/FlashVision/FlashDet
     val_p.add_argument("--device", default="cuda", help="Device (default: cuda)")
     val_p.add_argument("--conf", type=float, default=0.05, help="Confidence threshold (default: 0.05)")
     val_p.add_argument("--nms", type=float, default=0.6, help="NMS IoU threshold (default: 0.6)")
-    val_p.add_argument("--input-size", type=int, default=320, help="Input size (default: 320)")
+    val_p.add_argument("--input-size", type=int, default=None,
+                       help="Input size (default: from checkpoint/config)")
     val_p.add_argument("--batch-size", type=int, default=32, help="Batch size (default: 32)")
 
     # export

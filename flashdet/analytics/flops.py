@@ -203,8 +203,8 @@ class FLOPsCounter:
     def _get_model(self):
         if self._model is not None:
             return self._model
-        import torch
-        self._model = torch.load(str(self._model_path), map_location=self.device, weights_only=False)
+        from flashdet.utils.checkpoint import load_inference_model
+        self._model = load_inference_model(str(self._model_path), device=self.device)
         if hasattr(self._model, "eval"):
             self._model.eval()
         return self._model

@@ -150,9 +150,12 @@ class FewShotTrainer(Trainer):
 
         arch = self.architecture.lower()
         if arch in ("flashdet", ""):
-            size_key = {"m": "n", "m-0.5x": "n", "m-1.5x": "s"}.get(self.model_size, "n")
+            from flashdet.engine.training.trainer import resolve_flashdet_size
+            size_key = resolve_flashdet_size(self.model_size)
             model = FlashDet(
                 num_classes=num_classes, size=size_key, total_epochs=self.epochs,
+                backbone_type=getattr(cfg.model, "backbone_type", "lite"),
+                neck_type=getattr(cfg.model, "neck_type", None),
             ).to(self.device)
         else:
             cfg.model.num_classes = num_classes
@@ -168,9 +171,13 @@ class FewShotTrainer(Trainer):
         else:
             optimizer = create_optimizer(model, lr=self.lr, weight_decay=cfg.train.weight_decay)
 
-        ema = ModelEMA(model, decay=0.9998, warmup=2000)
+        ema = ModelEMA(
+            model,
+            decay=getattr(cfg.train, "ema_decay", 0.9998),
+            warmup=getattr(cfg.train, "ema_warmup", 2000),
+        )
 
-        eta_min = 0.00005
+        eta_min = self.lr * getattr(cfg.train, "lrf", 0.01)
         eta_min_factor = eta_min / self.lr
         def lr_lambda(epoch):
             if epoch < self.warmup_epochs:
@@ -212,7 +219,8 @@ class FewShotTrainer(Trainer):
 
     def _load_base_model(self, model: nn.Module) -> None:
         """Load base model weights and optionally freeze layers."""
-        ckpt = torch.load(self.base_checkpoint, map_location=self.device, weights_only=False)
+        from flashdet.utils import safe_torch_load
+        ckpt = safe_torch_load(self.base_checkpoint, map_location=self.device)
         state = ckpt.get("model_state_dict", ckpt)
         state = {k: v.float() if v.is_floating_point() else v for k, v in state.items()}
         missing, unexpected = model.load_state_dict(state, strict=False)

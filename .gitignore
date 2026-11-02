@@ -70,10 +70,9 @@ exported_models*/
 quantized_models/
 
 # ═══════════════════════════════════════════════════════════════
-# Datasets (large — only data/demo/ is tracked for quick tests)
+# Datasets (generate a demo with scripts/create_demo_dataset.py)
 # ═══════════════════════════════════════════════════════════════
 data/*
-!data/demo/
 
 # ═══════════════════════════════════════════════════════════════
 # Logs

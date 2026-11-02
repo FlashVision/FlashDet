@@ -17,12 +17,20 @@ Dataset format (COCO-style):
         ├── image1.jpg
         └── _annotations.coco.json
 
-A small demo dataset is included at data/demo/ for quick testing.
+A small synthetic demo dataset can be generated at data/demo/ for quick testing:
+
+    python scripts/create_demo_dataset.py
 """
 
+from pathlib import Path
+
 from flashdet import Trainer
+from flashdet.data import create_demo_dataset
 
 if __name__ == "__main__":
+    if not Path("data/demo/train/_annotations.coco.json").exists():
+        create_demo_dataset("data/demo")
+
     trainer = Trainer(
         model_size="n",
         train_images="data/demo/train",

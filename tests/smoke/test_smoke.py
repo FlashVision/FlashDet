@@ -16,12 +16,11 @@ class TestImports:
         assert hasattr(flashdet, "__version__")
 
     def test_import_models(self):
-        from flashdet.models import build_model
         from flashdet.models.detector import FlashDet
         assert FlashDet is not None
 
     def test_import_engine(self):
-        from flashdet.engine import Trainer, Validator, Predictor
+        from flashdet.engine import Trainer
         assert Trainer is not None
 
     def test_import_trackers(self):
@@ -30,24 +29,19 @@ class TestImports:
 
     def test_import_solutions(self):
         from flashdet.solutions import (
-            ObjectCounter, SpeedEstimator, Heatmap, RegionCounter,
-            QueueManager, DistanceCalculator, ParkingManager,
-            SecurityAlarm, WorkoutMonitor, LiveInference, AnalyticsDashboard,
+            ObjectCounter,
         )
         assert ObjectCounter is not None
 
     def test_import_analytics(self):
         from flashdet.analytics import (
-            Benchmark, Profiler, FLOPsCounter,
-            DetectionMetrics, DetectionErrorAnalyzer,
-            DatasetAnalyzer, AnalyticsReport,
+            FLOPsCounter,
         )
         assert FLOPsCounter is not None
 
     def test_import_data(self):
         from flashdet.data import (
-            FlashDetDataset, create_dataloader,
-            convert_dataset, detect_dataset_format,
+            FlashDetDataset,
         )
         assert FlashDetDataset is not None
 
@@ -60,7 +54,7 @@ class TestImports:
         assert get_config is not None
 
     def test_import_lora(self):
-        from flashdet.models.lora import apply_lora, apply_qlora, merge_lora_weights
+        from flashdet.models.lora import apply_lora
         assert apply_lora is not None
 
 
@@ -69,7 +63,6 @@ class TestBasicOperations:
     """Quick functional checks."""
 
     def test_model_instantiation(self):
-        import torch
         from flashdet.models.detector import FlashDet
         model = FlashDet(num_classes=5, size="n")
         assert model is not None
@@ -101,7 +94,8 @@ class TestBasicOperations:
         assert m is not None
 
     def test_dataset_format_detection(self):
-        import tempfile, os
+        import tempfile
+        import os
         from flashdet.data import detect_dataset_format
         tmp = tempfile.mkdtemp()
         fmt = detect_dataset_format(tmp)
@@ -110,7 +104,10 @@ class TestBasicOperations:
 
     def test_convert_dataset_noop(self):
         """convert_dataset should no-op for already-correct format."""
-        import json, os, tempfile, shutil
+        import json
+        import os
+        import tempfile
+        import shutil
         from flashdet.data import convert_dataset
 
         tmp = tempfile.mkdtemp()

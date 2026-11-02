@@ -25,7 +25,27 @@ def build_model(config, architecture: str = None):
 
     if arch in ("flashdet", ""):
         size = getattr(config.model, "size", "n")
-        return FlashDet(num_classes=num_classes, size=size, total_epochs=total_epochs)
+        kwargs = {}
+        strides = getattr(config.model, "strides", None)
+        if strides is not None:
+            kwargs["strides"] = tuple(strides)
+        if size == "p":
+            for key in ("backbone_type", "neck_type"):
+                value = getattr(config.model, key, None)
+                if value is not None:
+                    kwargs[key] = value
+            for key in ("pico_stem_channels", "pico_stage_depths",
+                        "pico_neck_channels"):
+                value = getattr(config.model, key, None)
+                if value is not None:
+                    # Map config names to detector constructor args.
+                    kwargs[key.replace("pico_", "")] = value
+        return FlashDet(
+            num_classes=num_classes,
+            size=size,
+            total_epochs=total_epochs,
+            **kwargs,
+        )
 
     # YOLO-family models
     width_mult = getattr(config.model, "width_mult", 1.0)

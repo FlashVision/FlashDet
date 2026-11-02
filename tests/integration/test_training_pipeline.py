@@ -1,8 +1,5 @@
 """Integration tests — end-to-end training pipeline."""
 
-import os
-import tempfile
-import shutil
 
 import numpy as np
 import pytest

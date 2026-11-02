@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "flashdet"
 version = "1.2.1"
-description = "FlashDet: Ultra-lightweight real-time object detection with LoRA fine-tuning and Knowledge Distillation"
+description = "FlashDet: Ultra-lightweight real-time object detection with LoRA fine-tuning and edge deployment"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
     {name = "FlashVision"},
 ]
-keywords = ["object-detection", "computer-vision", "deep-learning", "pytorch", "lora", "knowledge-distillation", "edge-ai", "onnx", "quantization"]
+keywords = ["object-detection", "computer-vision", "deep-learning", "pytorch", "lora", "edge-ai", "onnx", "quantization"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -69,6 +69,19 @@ addopts = "-v --tb=short --strict-markers"
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::UserWarning",
+]
+
+[tool.coverage.run]
+source = ["flashdet"]
+omit = ["*/__pycache__/*", "*/tests/*"]
+
+[tool.coverage.report]
+fail_under = 40
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
 ]
 
 [tool.ruff]

@@ -1,5 +1,13 @@
 from .lite_backbone import LiteBackbone, LiteUnit, channel_mix
 from .pico_backbone import PicoBackbone
+from .pico_zoo_backbone import (
+    PICO_BACKBONE_NAMES,
+    PICO_BACKBONE_PRESETS,
+    PicoZooBackbone,
+    get_pico_preset,
+    list_pico_backbones,
+    normalize_backbone_name,
+)
 from .flash_backbone import FlashBackbone
 from .yolov8_backbone import YOLOv8Backbone
 from .yolov9_backbone import YOLOv9Backbone
@@ -10,6 +18,7 @@ from flashdet.registry import BACKBONES
 
 BACKBONES.register("LiteBackbone")(LiteBackbone)
 BACKBONES.register("PicoBackbone")(PicoBackbone)
+BACKBONES.register("PicoZooBackbone")(PicoZooBackbone)
 BACKBONES.register("FlashBackbone")(FlashBackbone)
 BACKBONES.register("YOLOv8Backbone")(YOLOv8Backbone)
 BACKBONES.register("YOLOv9Backbone")(YOLOv9Backbone)
@@ -20,6 +29,12 @@ BACKBONES.register("YOLOXBackbone")(YOLOXBackbone)
 __all__ = [
     "LiteBackbone",
     "PicoBackbone",
+    "PicoZooBackbone",
+    "PICO_BACKBONE_NAMES",
+    "PICO_BACKBONE_PRESETS",
+    "get_pico_preset",
+    "list_pico_backbones",
+    "normalize_backbone_name",
     "FlashBackbone",
     "YOLOv8Backbone",
     "YOLOv9Backbone",

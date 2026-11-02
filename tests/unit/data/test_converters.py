@@ -5,7 +5,6 @@ import os
 import tempfile
 import shutil
 
-import numpy as np
 import pytest
 from PIL import Image
 
@@ -66,7 +65,7 @@ def yolo_dataset():
             img = Image.new("RGB", (640, 480), color="green")
             img.save(os.path.join(img_dir, f"img_{i}.jpg"))
             with open(os.path.join(lbl_dir, f"img_{i}.txt"), "w") as f:
-                f.write(f"0 0.5 0.5 0.3 0.4\n1 0.2 0.3 0.1 0.2\n")
+                f.write("0 0.5 0.5 0.3 0.4\n1 0.2 0.3 0.1 0.2\n")
 
     with open(os.path.join(tmp, "data.yaml"), "w") as f:
         f.write("names: ['cat', 'dog']\nnc: 2\n")
@@ -127,7 +126,7 @@ class TestConvertCOCOToVOC:
 
     def test_creates_xml_files(self, coco_dataset):
         out = os.path.join(coco_dataset, "output_voc")
-        stats = convert_coco_to_voc(coco_dataset, out)
+        convert_coco_to_voc(coco_dataset, out)
         ann_dir = os.path.join(out, "Annotations")
         assert os.path.isdir(ann_dir)
         xml_files = [f for f in os.listdir(ann_dir) if f.endswith(".xml")]

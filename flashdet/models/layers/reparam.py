@@ -144,3 +144,181 @@ class StrideDown(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.act(self.bn1(torch.cat([self.dw_s(x), self.dw_l(x)], dim=1)))
         return x + self.act(self.bn2(self.pw(x)))
+
+
+# ---------------------------------------------------------------------------
+# Pico-Zoo blocks — one lightweight block per architecture family.
+#
+# Every block is channel-preserving and can be used in both the backbone and
+# the neck.  Only the Rep family is structurally reparameterizable; the other
+# families are cheap, deployment-friendly CNN blocks inspired by the listed
+# architectures.
+# ---------------------------------------------------------------------------
+
+def _make_act(activation: str = "LeakyReLU") -> nn.Module:
+    if activation is None:
+        return nn.Identity()
+    if activation.lower() in ("leakyrelu", "leaky_relu"):
+        return nn.LeakyReLU(0.1, inplace=True)
+    return nn.SiLU(inplace=True)
+
+
+class SEBlock(nn.Module):
+    """Squeeze-and-excitation channel attention (very cheap at low width)."""
+
+    def __init__(self, channels: int, reduction: int = 4):
+        super().__init__()
+        hidden = max(8, channels // reduction)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Conv2d(channels, hidden, 1, bias=True)
+        self.fc2 = nn.Conv2d(hidden, channels, 1, bias=True)
+        self.act = nn.SiLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w = self.act(self.fc1(self.pool(x)))
+        w = torch.sigmoid(self.fc2(w))
+        return x * w
+
+
+class RepBlock(nn.Module):
+    """Category A — reparameterized depthwise block.
+
+    Training uses 3x3 + 1x3 + 3x1 + dilated-2x2 depthwise branches.
+    ``fuse()`` collapses them into a single 3x3 depthwise convolution.
+    """
+
+    def __init__(self, channels: int, activation: str = "LeakyReLU"):
+        super().__init__()
+        self.dw = FusedDWConv(channels)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.pw = nn.Conv2d(channels, channels, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
+        self.act = _make_act(activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.act(self.bn2(self.pw(self.bn1(self.dw(x)))))
+
+    @torch.no_grad()
+    def fuse(self):
+        self.dw = self.dw.fuse()
+        return self
+
+
+class GhostBlock(nn.Module):
+    """Category C — cheap feature generation (GhostNetV2/MobileNetV4 style)."""
+
+    def __init__(self, channels: int, activation: str = "LeakyReLU"):
+        super().__init__()
+        mid = max(1, channels // 2)
+        new = max(1, channels - mid)
+        self.primary = nn.Sequential(
+            nn.Conv2d(channels, mid, 1, bias=False),
+            nn.BatchNorm2d(mid),
+            _make_act(activation),
+        )
+        self.cheap = nn.Sequential(
+            nn.Conv2d(mid, new, 3, 1, 1, groups=mid, bias=False),
+            nn.BatchNorm2d(new),
+            _make_act(activation),
+        )
+        self.project = nn.Sequential(
+            nn.Conv2d(mid + new, channels, 1, bias=False),
+            nn.BatchNorm2d(channels),
+        )
+        self.act = _make_act(activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.primary(x)
+        y = torch.cat([y, self.cheap(y)], dim=1)
+        return x + self.act(self.project(y))
+
+
+class AttentionBlock(nn.Module):
+    """Category B/G — local depthwise mixing + channel/spatial gating."""
+
+    def __init__(self, channels: int, expansion: int = 2,
+                 activation: str = "LeakyReLU"):
+        super().__init__()
+        hidden = max(channels, channels * expansion)
+        self.dw = nn.Conv2d(channels, channels, 3, 1, 1, groups=channels, bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.se = SEBlock(channels)
+        self.pw1 = nn.Conv2d(channels, hidden, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(hidden)
+        self.pw2 = nn.Conv2d(hidden, channels, 1, bias=False)
+        self.bn3 = nn.BatchNorm2d(channels)
+        self.act = _make_act(activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.act(self.bn1(self.dw(x)))
+        y = self.se(y)
+        y = self.act(self.bn2(self.pw1(y)))
+        y = self.bn3(self.pw2(y))
+        return x + self.act(y)
+
+
+class SSMBlock(nn.Module):
+    """Category D/H — MambaOut-style gated token mixer.
+
+    Uses a gated depthwise convolution instead of selective-scan kernels so it
+    runs on CPU/edge devices with no CUDA-only Mamba dependency.
+    """
+
+    def __init__(self, channels: int, activation: str = "LeakyReLU"):
+        super().__init__()
+        self.norm = nn.BatchNorm2d(channels)
+        self.dw = nn.Conv2d(channels, channels, 3, 1, 1, groups=channels, bias=False)
+        self.gate = nn.Conv2d(channels, channels, 1, bias=True)
+        self.pw = nn.Conv2d(channels, channels, 1, bias=False)
+        self.bn = nn.BatchNorm2d(channels)
+        self.act = _make_act(activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.norm(x)
+        gate = torch.sigmoid(self.gate(y))
+        y = self.act(self.dw(y)) * gate
+        return x + self.act(self.bn(self.pw(y)))
+
+
+class LCNetBlock(nn.Module):
+    """Category E/F — PP-LCNet / ShuffleNet-style depthwise + SE block."""
+
+    def __init__(self, channels: int, kernel_size: int = 5,
+                 activation: str = "LeakyReLU"):
+        super().__init__()
+        self.dw = nn.Conv2d(
+            channels, channels, kernel_size, 1, kernel_size // 2,
+            groups=channels, bias=False,
+        )
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.se = SEBlock(channels)
+        self.pw = nn.Conv2d(channels, channels, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
+        self.act = _make_act(activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.se(self.act(self.bn1(self.dw(x))))
+        return x + self.act(self.bn2(self.pw(y)))
+
+
+PICO_BLOCK_FAMILIES = ("rep", "ghost", "attention", "mamba", "lcnet")
+
+
+def make_pico_block(family: str, channels: int,
+                    activation: str = "LeakyReLU") -> nn.Module:
+    """Build one channel-preserving Pico-Zoo block by family name."""
+    family = (family or "rep").lower()
+    if family in ("rep", "reparam", "repvit", "mobileone", "fastvit"):
+        return RepBlock(channels, activation)
+    if family in ("ghost", "ghostnet", "efficientnet", "fasternet"):
+        return GhostBlock(channels, activation)
+    if family in ("attention", "attn", "transformer", "hybrid"):
+        return AttentionBlock(channels, activation=activation)
+    if family in ("mamba", "ssm", "mambaout"):
+        return SSMBlock(channels, activation)
+    if family in ("lcnet", "lc", "shufflenet", "esnet", "peleenet"):
+        return LCNetBlock(channels, activation=activation)
+    raise ValueError(
+        f"Unknown Pico block family '{family}'. "
+        f"Choose from: {', '.join(PICO_BLOCK_FAMILIES)}"
+    )

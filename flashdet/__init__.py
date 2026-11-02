@@ -1,6 +1,10 @@
 """FlashDet — Ultra-lightweight real-time object detection."""
 
-__version__ = "1.1.0"
+try:
+    from importlib.metadata import PackageNotFoundError, version as _version
+    __version__ = _version("flashdet")
+except PackageNotFoundError:  # running from a source checkout
+    __version__ = "1.2.1"
 
 from flashdet.models.detector import FlashDet, build_model
 from flashdet.models.lora import apply_lora, apply_qlora, merge_lora_weights

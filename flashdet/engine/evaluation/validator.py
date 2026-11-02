@@ -11,6 +11,7 @@ from flashdet.cfg import get_config
 from flashdet.models import FlashDet
 from flashdet.data import create_dataloader
 from flashdet.utils import AverageMeter
+from flashdet.utils.checkpoint import safe_torch_load
 from flashdet.utils.metrics import compute_map
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ class Validator:
         device: str = "cuda",
         batch_size: int = 32,
         workers: int = 4,
-        input_size: int = 320,
+        input_size: Optional[int] = None,
         conf_thresh: float = 0.05,
         nms_thresh: float = 0.6,
         iou_threshold: float = 0.5,
@@ -45,7 +46,8 @@ class Validator:
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.batch_size = batch_size
         self.workers = workers
-        self.input_size = (input_size, input_size)
+        size = int(input_size) if input_size else 320
+        self.input_size = (size, size)
         self.conf_thresh = conf_thresh
         self.nms_thresh = nms_thresh
         self.iou_threshold = iou_threshold
@@ -63,22 +65,33 @@ class Validator:
             raise ValueError("Either model_path or model must be provided")
 
     def _load_model(self, model_path: str, cfg):
-        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+        checkpoint = safe_torch_load(model_path, map_location="cpu")
 
         num_classes = cfg.model.num_classes
         class_names = list(cfg.class_names)
         size = getattr(cfg.model, "size", "n")
+        backbone_type = "lite"
+        neck_type = None
 
         if "config" in checkpoint:
             ckpt_cfg = checkpoint["config"]
             num_classes = ckpt_cfg.get("num_classes", num_classes)
             size = ckpt_cfg.get("model_size", ckpt_cfg.get("size", size))
+            ckpt_input = ckpt_cfg.get("input_size")
+            if isinstance(ckpt_input, (list, tuple)):
+                ckpt_input = ckpt_input[0]
+            if ckpt_input:
+                self.input_size = (int(ckpt_input), int(ckpt_input))
+            backbone_type = ckpt_cfg.get("backbone_type") or "lite"
+            neck_type = ckpt_cfg.get("neck_type")
             if "class_names" in ckpt_cfg and ckpt_cfg["class_names"]:
                 class_names = ckpt_cfg["class_names"]
 
         model = FlashDet(
             num_classes=num_classes,
             size=size,
+            backbone_type=backbone_type,
+            neck_type=neck_type,
         )
 
         if "model_state_dict" in checkpoint:

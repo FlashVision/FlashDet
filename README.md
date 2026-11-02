@@ -61,6 +61,36 @@ Training Pipeline:
 - **PicoNeck** with 64-ch output (lightweight modules for efficient feature generation)
 - **Depthwise-separable E2E dual head** (DW-conv + pointwise instead of full convolutions)
 - Same STAL + ProgLoss training recipe as larger variants
+
+### Pico-Zoo backbones and necks
+
+`FlashDet-P` accepts **all 40 architecture names** from the Pico model table:
+
+```bash
+# RepViT / MobileOne / FastViT / RepGhostNet
+python train.py --model-size p --backbone repvit ...
+
+# EdgeNeXt / MobileViTv2 / EfficientFormerV2 / SHViT / EfficientViT / SwiftFormer
+python train.py --model-size p --backbone edgenext ...
+
+# EfficientNetV2 / EMO / FasterNet / StarNet / MobileNetV4 / GhostNetV2
+python train.py --model-size p --backbone mobilenetv4 ...
+
+# MobileMamba / EfficientVMamba / MambaVision / MambaOut / EfficientViM
+python train.py --model-size p --backbone mambaout --neck mamba ...
+
+# PP-LCNet / LCNet / ESNet / PeleeNet / ShuffleNetV2
+python train.py --model-size p --backbone pp_lcnet ...
+
+# ... and InceptionNeXt, UniRepLKNet, ConvNeXtV2, EfficientRep, ReXNet,
+# MobileFormer, EdgeViT, TinyViT, LeViT, LowFormer, LocalMamba, VMamba,
+# PlainMamba
+```
+
+The neck family is selected automatically from the backbone family, or set it
+explicitly with `--neck {pan,rep,ghost,attention,mamba,lcnet}`. See
+[docs/Pico-Zoo.md](docs/Pico-Zoo.md) for the full list and family mapping.
+
 ---
 
 ## Installation
@@ -349,6 +379,9 @@ Ready-to-run scripts in [`examples/`](examples/):
 | `train_with_lora.py` | LoRA fine-tuning (DoRA variant) |
 
 ```bash
+# Generate the synthetic demo dataset (annotations + images)
+python scripts/create_demo_dataset.py
+
 cd examples
 python train_custom_dataset.py
 ```
@@ -360,45 +393,39 @@ python train_custom_dataset.py
 ```
 FlashDet/
 ├── flashdet/                        # Main package
-│   ├── __init__.py                  # Public API
+│   ├── __init__.py                  # Public API + version
 │   ├── cli.py                       # CLI entry point
 │   ├── registry.py                  # Pluggable component registry
-│   ├── cfg/                         # Configuration
-│   ├── data/                        # Datasets, loaders, transforms, download
+│   ├── cfg/                         # Model / data / train configuration
+│   ├── data/                        # Datasets, loaders, transforms, download, demo generator
 │   ├── engine/
 │   │   ├── core/                    # Callbacks, EMA, MuSGD optimizer
-│   │   ├── training/                # All training paradigms
-│   │   │   ├── trainer.py           # Standard Trainer
-│   │   │   ├── kd_trainer.py        # Knowledge Distillation
-│   │   │   ├── ssl_trainer.py       # Self-Supervised Learning
-│   │   │   ├── semi_supervised_trainer.py
-│   │   │   ├── few_shot_trainer.py
-│   │   │   └── active_learning_trainer.py
-│   │   └── evaluation/              # Validator
+│   │   ├── training/                # Trainer, SSL, semi-supervised, few-shot, active learning
+│   │   ├── evaluation/              # Validator
+│   │   └── inference/               # Predictor + post-processing
 │   ├── models/
-│   │   ├── architectures/
-│   │   │   └── flashdet.py          # FlashDet + FlashDetPico
-│   │   ├── backbone/                # LiteBackbone, PicoBackbone, FlashBackbone
-│   │   ├── neck/                    # PicoNeck, YOLO necks
-│   │   ├── head/                    # E2E dual detection head
-│   │   ├── layers/                  # ConvBlock, PicoBlock, SpatialPool, RepNeXt blocks
+│   │   ├── architectures/           # FlashDet, FlashDet-Pico, FlashDet-Micro, YOLO variants
+│   │   ├── backbone/                # Lite, Pico, Pico-Zoo, Flash, YOLO backbones
+│   │   ├── neck/                    # Pico, Pico-Zoo, YOLO necks
+│   │   ├── head/                    # E2E dual head, YOLO/YOLOX heads
+│   │   ├── layers/                  # Conv, reparameterization, micro and YOLO blocks
 │   │   ├── assignment/              # STAL
 │   │   ├── detector.py              # build_model() factory
-│   │   └── lora.py                  # LoRA / QLoRA (6 variants)
-│   ├── losses/
-│   │   ├── e2e_loss.py              # E2E dual-head loss + ProgLoss
-│   │   └── kd_loss.py               # Knowledge distillation losses
-│   ├── utils/                       # Metrics, visualization, checkpoints
+│   │   └── lora.py                  # LoRA / QLoRA variants
+│   ├── losses/                      # E2E, YOLO and Varifocal losses
+│   ├── utils/                       # Checkpoints, metrics, visualization, optimizations
 │   ├── trackers/                    # SORT, ByteTrack, BoT-SORT, DeepSORT, OC-SORT, StrongSORT
-│   ├── solutions/                   # 17 ready-to-use vision solutions
-│   └── analytics/                   # Benchmark, profiling, plots
-├── scripts/                         # Training scripts (SSL, few-shot, etc.)
-├── examples/                        # Ready-to-run example scripts
-├── tests/                           # Unit & integration tests (pytest)
-├── docs/                            # Documentation
+│   ├── solutions/                   # Ready-to-use vision solutions
+│   └── analytics/                   # Benchmark, profiling, plots, reports
+├── configs/                         # Example YAML training configs
+├── scripts/                         # Training, export, benchmark, security, load-test scripts
+├── examples/                        # Ready-to-run Python examples
+├── tests/                           # Unit, integration, smoke and security tests
+├── docs/                            # Guides, audits, changelog, archived training logs
 ├── docker/                          # Dockerfile + docker-compose
 ├── train.py                         # Main training entry point
-├── test.py                          # Main inference entry point
+├── test.py                          # Main inference / evaluation entry point
+├── Makefile                         # test / coverage / lint / security targets
 └── pyproject.toml                   # Package configuration
 ```
 

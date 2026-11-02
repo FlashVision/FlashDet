@@ -1,7 +1,6 @@
 """Tests for FLOPsCounter — computational complexity measurement."""
 
 import pytest
-import torch
 
 from flashdet.analytics.flops import FLOPsCounter
 from flashdet.models.detector import FlashDet

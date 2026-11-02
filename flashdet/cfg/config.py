@@ -42,15 +42,22 @@ class ModelConfig:
     backbone: str = "LiteBackbone"
     backbone_size: str = "1.0x"
     backbone_pretrained: bool = True
-    
+
+    # Pico backbone/neck selectors (see docs/Pico-Zoo.md)
+    backbone_type: str = "lite"
+    neck_type: Optional[str] = None
+    pico_stem_channels: Optional[int] = None
+    pico_stage_depths: Optional[Tuple[int, int, int]] = None
+    pico_neck_channels: int = 80
+
     # FlashDet FPN
     fpn_in_channels: List[int] = field(default_factory=lambda: [116, 232, 464])
     fpn_out_channels: int = 96
-    
+
     # FlashDet head
     head_channels: int = 96
     stacked_convs: int = 2
-    strides: List[int] = field(default_factory=lambda: [8, 16, 32, 64])
+    strides: List[int] = field(default_factory=lambda: [8, 16, 32])
     reg_max: int = 7
     
     # FlashDet loss weights
@@ -75,11 +82,27 @@ class TrainConfig:
     weight_decay: float = 0.05
     warmup_epochs: int = 5
     grad_clip: float = 35.0
+    grad_clip_norm: float = 10.0
     val_interval: int = 5
+    val_score_thr: float = 0.01
+    max_det: int = 300
     save_dir: str = "workspace/flashdet_output"
     resume: Optional[str] = None
     patience: int = 50
     pretrained_coco: bool = False
+
+    # --- Scheduler / EMA / batch normalisation ---
+    nbs: int = 64
+    lrf: float = 0.1
+    ema_decay: float = 0.9998
+    ema_warmup: int = 2000
+    warmup_momentum: float = 0.8
+    base_momentum: float = 0.937
+    warmup_min_iters: int = 100
+    multi_scale: bool = False
+    multi_scale_sizes: List[int] = field(
+        default_factory=lambda: [256, 288, 320, 352, 384, 416]
+    )
 
     # --- Performance ---
     amp: bool = False
@@ -106,15 +129,6 @@ class TrainConfig:
     # --- QLoRA (Quantized LoRA) ---
     use_qlora: bool = False
     qlora_quant_dtype: str = "int8"
-
-    # --- Knowledge Distillation (torchtune-style) ---
-    use_kd: bool = False
-    kd_teacher_checkpoint: Optional[str] = None
-    kd_teacher_model_size: str = "m-1.5x"
-    kd_temperature: float = 4.0
-    kd_logit_weight: float = 1.0
-    kd_feature_weight: float = 0.5
-    kd_hard_loss_weight: float = 1.0
 
     # --- Augmentations ---
     mosaic: bool = False
@@ -225,6 +239,8 @@ def load_yaml_config(yaml_path: str) -> Config:
     if "model" in raw:
         for key, value in raw["model"].items():
             if key == "input_size" and isinstance(value, list):
+                value = tuple(value)
+            if key == "pico_stage_depths" and isinstance(value, list):
                 value = tuple(value)
             if hasattr(cfg.model, key):
                 setattr(cfg.model, key, value)

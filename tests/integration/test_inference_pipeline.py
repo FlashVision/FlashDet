@@ -1,7 +1,6 @@
 """Integration tests — end-to-end inference pipeline."""
 
 import numpy as np
-import pytest
 import torch
 
 from flashdet.models.detector import FlashDet

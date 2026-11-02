@@ -1,7 +1,6 @@
 """Tests for tracker matching functions — IoU batch computation."""
 
 import numpy as np
-import pytest
 
 from flashdet.trackers.matching.iou import iou_batch
 

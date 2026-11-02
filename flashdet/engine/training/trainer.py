@@ -19,6 +19,7 @@ from flashdet.models.lora import (
 from flashdet.data import create_dataloader, verify_dataset, verify_training_data
 from flashdet.utils import (
     save_checkpoint, load_checkpoint, save_inference_weights, setup_logger, AverageMeter,
+    safe_torch_load,
 )
 from flashdet.utils.metrics import compute_map
 from flashdet.utils.torchtune_optim import (
@@ -122,8 +123,9 @@ class Trainer:
         lora_targets: Optional[List[str]] = None,
         qlora: bool = False,
         qlora_dtype: str = "int8",
-        # Backbone (Pico only)
-        backbone_type: str = "lite",
+        # Backbone / neck (Pico only; None = read from config, then default)
+        backbone_type: Optional[str] = None,
+        neck_type: Optional[str] = None,
         # Augmentations
         mosaic: bool = False,
         mixup: bool = False,
@@ -165,6 +167,7 @@ class Trainer:
         self.qlora_dtype = qlora_dtype
         self.architecture = architecture
         self.backbone_type = backbone_type
+        self.neck_type = neck_type
         self.pretrained_coco = False
         self.val_interval = 1
         self.mosaic = mosaic
@@ -268,6 +271,8 @@ class Trainer:
     def train(self) -> Dict[str, float]:
         """Run the full training loop. Returns dict with best_map50 and best_loss."""
         cfg = self._config
+        self.backbone_type = self.backbone_type or getattr(cfg.model, "backbone_type", "lite")
+        self.neck_type = self.neck_type or getattr(cfg.model, "neck_type", None)
 
         if self.train_images:
             cfg.data.train_images = self.train_images
@@ -343,6 +348,7 @@ class Trainer:
                 size=size_key,
                 total_epochs=self.epochs,
                 backbone_type=self.backbone_type,
+                neck_type=self.neck_type,
             ).to(self.device)
         else:
             cfg.model.num_classes = num_classes
@@ -389,7 +395,7 @@ class Trainer:
         )
 
         # LR schedule (cosine decay from lr to lr*lrf)
-        lrf = getattr(self, 'lrf', 0.01)
+        lrf = getattr(self, "lrf", getattr(cfg.train, "lrf", 0.01))
 
         def _one_cycle(y1=0.0, y2=1.0, steps=100):
             return lambda x: max((1 - math.cos(x * math.pi / steps)) / 2, 0) * (y2 - y1) + y1
@@ -402,7 +408,9 @@ class Trainer:
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
 
         # EMA
-        ema = ModelEMA(raw_model, decay=0.9998, warmup=2000)
+        ema_decay = getattr(cfg.train, "ema_decay", 0.9998)
+        ema_warmup = getattr(cfg.train, "ema_warmup", 2000)
+        ema = ModelEMA(raw_model, decay=ema_decay, warmup=ema_warmup)
 
         # Resume
         start_epoch = 0
@@ -413,13 +421,16 @@ class Trainer:
             ckpt = load_checkpoint(raw_model, self.resume, optimizer, scheduler, self.device)
             start_epoch = ckpt["epoch"] + 1
             best_loss = ckpt.get("loss", float("inf"))
-            raw_ckpt = torch.load(self.resume, map_location=self.device, weights_only=False)
+            raw_ckpt = safe_torch_load(self.resume, map_location=self.device)
             if raw_ckpt and "ema_state_dict" in raw_ckpt:
                 ema.load_state_dict(raw_ckpt["ema_state_dict"])
             else:
-                ema = ModelEMA(raw_model, decay=0.9998, warmup=2000)
+                ema = ModelEMA(raw_model, decay=ema_decay, warmup=ema_warmup)
             self._logger.info(f"Resumed from epoch {start_epoch}")
 
+        self._val_score_thr = getattr(cfg.train, "val_score_thr", 0.05)
+        self._val_max_det = getattr(cfg.train, "max_det", 300)
+        self._grad_clip_norm = getattr(cfg.train, "grad_clip_norm", 10.0)
         model_config = {
             "num_classes": num_classes,
             "input_size": self.input_size,
@@ -428,6 +439,8 @@ class Trainer:
             "fpn_channels": self._model_cfg.get("fpn_channels"),
             "class_names": class_names,
             "architecture": self.architecture,
+            "backbone_type": getattr(raw_model, "backbone_type", self.backbone_type),
+            "neck_type": getattr(raw_model, "neck_type", self.neck_type),
         }
 
         # Iteration-based warmup
@@ -601,7 +614,7 @@ class Trainer:
 
     def _load_pretrained(self, model: nn.Module, cfg):
         if self.finetune and not self.resume:
-            ckpt = torch.load(self.finetune, map_location=self.device, weights_only=False)
+            ckpt = safe_torch_load(self.finetune, map_location=self.device)
             src_sd = ckpt.get("model_state_dict", ckpt)
             src_sd = {k: v.float() if v.is_floating_point() else v for k, v in src_sd.items()}
             model.load_state_dict(src_sd, strict=False)
@@ -649,11 +662,17 @@ class Trainer:
             if (batch_idx + 1) % self.grad_accum == 0 or (batch_idx + 1) == len(dataloader):
                 if scaler:
                     scaler.unscale_(optimizer)
-                    nn.utils.clip_grad_norm_(raw_model.parameters(), 10.0)
+                    nn.utils.clip_grad_norm_(
+                        raw_model.parameters(),
+                        getattr(self, "_grad_clip_norm", 10.0),
+                    )
                     scaler.step(optimizer)
                     scaler.update()
                 else:
-                    nn.utils.clip_grad_norm_(raw_model.parameters(), 10.0)
+                    nn.utils.clip_grad_norm_(
+                        raw_model.parameters(),
+                        getattr(self, "_grad_clip_norm", 10.0),
+                    )
                     optimizer.step()
                 optimizer.zero_grad()
 
@@ -709,7 +728,11 @@ class Trainer:
                 v = val.item() if hasattr(val, "item") else float(val)
                 sub_meters[key].update(v)
 
-            results = eval_model.predict(images, None, score_thr=0.05, nms_thr=0.6)
+            results = eval_model.predict(
+                images, None,
+                score_thr=getattr(self, "_val_score_thr", 0.05),
+                max_det=getattr(self, "_val_max_det", 300),
+            )
             for i, (dets, lbs) in enumerate(results):
                 gt_boxes = gt_meta["gt_bboxes"][i]
                 gt_labels = gt_meta["gt_labels"][i]
@@ -726,7 +749,7 @@ class Trainer:
                 all_preds.append({"boxes": boxes_np, "scores": scores_np, "labels": lbs_np})
                 all_gts.append({"boxes": gt_boxes, "labels": gt_labels})
 
-        num_cls = len(class_names) if class_names else 10
+        num_cls = len(class_names) if class_names else getattr(eval_model, "num_classes", 80)
         map_results = compute_map(all_preds, all_gts, iou_threshold=0.5, num_classes=num_cls)
         map50 = map_results["mAP"]
 

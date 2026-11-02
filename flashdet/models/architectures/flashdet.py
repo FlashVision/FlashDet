@@ -32,7 +32,12 @@ import torch.nn as nn
 
 from flashdet.registry import DETECTORS
 from flashdet.models.backbone.flash_backbone import FlashBackbone
+from flashdet.models.backbone.pico_zoo_backbone import (
+    PicoZooBackbone,
+    normalize_backbone_name,
+)
 from flashdet.models.neck.pico_neck import PicoNeck
+from flashdet.models.neck.pico_zoo_neck import build_pico_neck, resolve_neck_family
 from flashdet.models.head.e2e_head import E2EDualHead
 from flashdet.losses.e2e_loss import E2EDetectionLoss
 from flashdet.utils.bbox import make_anchor_grid, decode_batch_nms_free
@@ -53,6 +58,14 @@ SIZE_CONFIGS = {
     "m": {"stem": 64,  "depths": (4, 8, 4),   "neck_ch": 192, "neck_blocks": 2},
     "l": {"stem": 80,  "depths": (4, 12, 4),  "neck_ch": 256, "neck_blocks": 2},
     "x": {"stem": 96,  "depths": (4, 16, 4),  "neck_ch": 320, "neck_blocks": 2},
+}
+
+# Single source of truth for the legacy RepNeXt Pico backbone.  Previously
+# these values were duplicated inline inside FlashDetPico.
+PICO_V2_CONFIG = {
+    "stem_channels": 28,
+    "stage_channels": (56, 112, 224),
+    "stage_depths": (2, 4, 2),
 }
 
 
@@ -82,38 +95,70 @@ class FlashDetPico(nn.Module):
         num_classes: int = 80,
         strides: Tuple[int, ...] = (8, 16, 32),
         total_epochs: int = 100,
-        neck_channels: int = 80,
+        neck_channels: Optional[int] = None,
         pretrained_backbone: bool = True,
         backbone_type: str = "lite",
+        neck_type: Optional[str] = None,
+        stem_channels: Optional[int] = None,
+        stage_channels: Optional[Tuple[int, ...]] = None,
+        stage_depths: Optional[Tuple[int, ...]] = None,
         **kwargs,
     ):
         super().__init__()
         from flashdet.models.backbone.lite_backbone import LiteBackbone
         from flashdet.models.backbone.pico_backbone import PicoBackbone
 
+        if len(strides) != 3:
+            raise ValueError(
+                f"FlashDet-P expects exactly 3 FPN strides (8, 16, 32); got {strides}"
+            )
         self.num_classes = num_classes
         self.size = "p"
         self.strides = strides
         self.total_epochs = total_epochs
         self.backbone_type = backbone_type
 
+        legacy_backbone = backbone_type in (
+            "lite", "shufflenetv2", "shufflenet_v2", "shufflenet"
+        )
+        neck_channels = int(neck_channels or 80)
+
         if backbone_type in ("pico_v2", "repnext"):
+            pico_cfg = PICO_V2_CONFIG
             self.backbone = PicoBackbone(
-                stem_channels=28,
-                stage_channels=(56, 112, 224),
-                stage_depths=(2, 4, 2),
+                stem_channels=stem_channels or pico_cfg["stem_channels"],
+                stage_channels=stage_channels or pico_cfg["stage_channels"],
+                stage_depths=stage_depths or pico_cfg["stage_depths"],
                 out_stages=(0, 1, 2),
                 activation="LeakyReLU",
             )
-        else:
+        elif legacy_backbone:
             self.backbone = LiteBackbone(
                 model_size="0.5x",
                 out_stages=(2, 3, 4),
                 pretrained=pretrained_backbone,
                 activation="LeakyReLU",
             )
+        else:
+            # Any architecture name from the Pico model table.
+            normalize_backbone_name(backbone_type)  # raises with a helpful list
+            self.backbone = PicoZooBackbone(
+                arch=backbone_type,
+                stem_channels=stem_channels,
+                stage_depths=stage_depths,
+                out_stages=(0, 1, 2),
+                activation="LeakyReLU",
+            )
 
-        self.neck = PicoNeck(
+        # Pick the matching Pico neck family automatically for zoo backbones.
+        if neck_type is None:
+            if legacy_backbone or backbone_type in ("pico_v2", "repnext"):
+                neck_type = "pan"
+            else:
+                neck_type = resolve_neck_family(backbone_type)
+        self.neck_type = resolve_neck_family(neck_type)
+        self.neck = build_pico_neck(
+            self.neck_type,
             in_channels=self.backbone.out_channels,
             out_channels=neck_channels,
             kernel_size=5,
@@ -122,7 +167,9 @@ class FlashDetPico(nn.Module):
             activation="LeakyReLU",
         )
 
-        self.head = E2EDualHead(num_classes, neck_channels, num_levels=3)
+        self.head = E2EDualHead(
+            num_classes, neck_channels, num_levels=len(strides)
+        )
 
         self.loss_fn = E2EDetectionLoss(
             num_classes=num_classes,
@@ -243,7 +290,7 @@ class FlashDetPico(nn.Module):
         o2m_params = sum(p.numel() for p in self.head.o2m_heads.parameters())
         inference_params = total - o2m_params
         return {
-            "name": "FlashDet-P",
+            "name": f"FlashDet-P ({self.backbone_type}/{self.neck_type})",
             "num_classes": self.num_classes,
             "size": "p",
             "total_params": total,
@@ -317,6 +364,10 @@ class FlashDet(nn.Module):
         _neck_ch = neck_channels if neck_channels is not None else cfg["neck_ch"]
         _neck_blocks = cfg.get("neck_blocks", 1)
 
+        if len(strides) != 3:
+            raise ValueError(
+                f"FlashDet expects exactly 3 FPN strides (8, 16, 32); got {strides}"
+            )
         self.num_classes = num_classes
         self.size = size
         self.strides = strides
@@ -340,7 +391,7 @@ class FlashDet(nn.Module):
         )
 
         # Head: Depthwise-separable dual detection head (o2o + o2m)
-        self.head = E2EDualHead(num_classes, _neck_ch, num_levels=3)
+        self.head = E2EDualHead(num_classes, _neck_ch, num_levels=len(strides))
 
         # Loss: E2E with ProgLoss + STAL
         self.loss_fn = E2EDetectionLoss(

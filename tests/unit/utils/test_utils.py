@@ -1,6 +1,5 @@
 """Tests for utility functions — bbox decoding, anchor grid."""
 
-import pytest
 import torch
 
 from flashdet.utils.bbox import make_anchor_grid, bbox_iou_aligned

@@ -1,5 +1,6 @@
 """Tests for LoRA and QLoRA fine-tuning."""
 
+import numpy as np
 import pytest
 import torch
 
@@ -78,5 +79,4 @@ class TestQLoRA:
         assert out is not None
 
 
-# Need numpy for gt_meta
-import numpy as np
+

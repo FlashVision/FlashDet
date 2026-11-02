@@ -1,6 +1,13 @@
 from .visualization import draw_detections, draw_boxes, COLORS, make_gt_pred_panel
 from .metrics import compute_map, compute_iou
-from .checkpoint import save_checkpoint, load_checkpoint, save_weights_only, save_inference_weights
+from .checkpoint import (
+    save_checkpoint,
+    load_checkpoint,
+    save_weights_only,
+    save_inference_weights,
+    safe_torch_load,
+    load_inference_model,
+)
 from .logger import setup_logger, AverageMeter
 from .bbox import make_anchor_grid, decode_ltrb, bbox_iou_aligned, decode_batch_nms_free
 from .torchtune_optim import (
@@ -15,6 +22,7 @@ __all__ = [
     "draw_detections", "draw_boxes", "COLORS", "make_gt_pred_panel",
     "compute_map", "compute_iou",
     "save_checkpoint", "load_checkpoint", "save_weights_only", "save_inference_weights",
+    "safe_torch_load", "load_inference_model",
     "setup_logger", "AverageMeter",
     "make_anchor_grid", "decode_ltrb", "bbox_iou_aligned", "decode_batch_nms_free",
     "apply_activation_checkpointing", "ActivationOffloadHook",

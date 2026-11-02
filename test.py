@@ -39,8 +39,9 @@ from flashdet.cfg import get_config
 from flashdet.models import FlashDet
 from flashdet.models.detector import build_model
 from flashdet.data.transforms import InferenceTransform
-from flashdet.utils import draw_detections, load_checkpoint
-from flashdet.utils.visualization import make_gt_pred_panel, draw_boxes, make_color_palette
+from flashdet.utils import draw_detections
+from flashdet.utils.checkpoint import safe_torch_load
+from flashdet.utils.visualization import make_gt_pred_panel, make_color_palette
 
 
 # ──────────────────────────────────────────────────────
@@ -184,7 +185,7 @@ class FlashDetDetector:
         if model_path is None:
             raise ValueError("--model is required")
 
-        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+        checkpoint = safe_torch_load(model_path, map_location="cpu")
 
         num_classes   = config.model.num_classes
         inp_size      = config.model.input_size
@@ -220,8 +221,12 @@ class FlashDetDetector:
             or checkpoint
         )
         backbone_type = "lite"
+        neck_type = None
         if "config" in checkpoint:
-            backbone_type = checkpoint["config"].get("backbone_type", "lite")
+            backbone_type = checkpoint["config"].get("backbone_type") or "lite"
+            neck_type = checkpoint["config"].get("neck_type")
+        # Backwards compatibility: old Pico-v2 checkpoints predate the
+        # backbone_type field, so infer it from the state-dict keys.
         if backbone_type == "lite":
             sd_keys = list(sd_for_load.keys())
             if any(k.startswith("backbone.stem.") or k.startswith("backbone.stages.") for k in sd_keys):
@@ -233,6 +238,7 @@ class FlashDetDetector:
                 num_classes=num_classes,
                 size=ckpt_model_size,
                 backbone_type=backbone_type,
+                neck_type=neck_type,
             )
         else:
             config.model.num_classes = num_classes

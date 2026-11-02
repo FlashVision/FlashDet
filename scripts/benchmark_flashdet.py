@@ -19,14 +19,12 @@ import time
 import json
 
 import torch
-import torch.nn as nn
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from flashdet.models.architectures.flashdet import FlashDet
 from flashdet.cfg import get_config
-from flashdet.data import create_dataloader
 from flashdet.utils.metrics import compute_map
 
 
@@ -121,8 +119,8 @@ def evaluate_map(model, val_dir, device, input_size, num_classes=80, batch_size=
         dw = (input_size - new_w) / 2
 
         img_resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
-        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+        top = int(round(dh - 0.1))
+        left = int(round(dw - 0.1))
         img_resized = cv2.copyMakeBorder(img_resized, top, input_size - new_h - top,
                                          left, input_size - new_w - left,
                                          cv2.BORDER_CONSTANT, value=(114, 114, 114))

@@ -229,9 +229,9 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"All {sample_count * 3} images saved to: {args.output_dir}/")
-    print(f"  stage1_raw_*.jpg       — raw images with original COCO boxes")
-    print(f"  stage2_transform_*.jpg — after TrainTransform")
-    print(f"  stage3_loader_*.jpg    — full dataloader output")
+    print("  stage1_raw_*.jpg       — raw images with original COCO boxes")
+    print("  stage2_transform_*.jpg — after TrainTransform")
+    print("  stage3_loader_*.jpg    — full dataloader output")
     print(f"{'='*60}")
 
 

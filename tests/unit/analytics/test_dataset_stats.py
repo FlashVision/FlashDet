@@ -1,13 +1,8 @@
 """Tests for DatasetAnalyzer — dataset composition analysis."""
 
 import json
-import os
-import tempfile
-import shutil
 
-import numpy as np
 import pytest
-from PIL import Image
 
 from flashdet.analytics.dataset_stats import DatasetAnalyzer
 

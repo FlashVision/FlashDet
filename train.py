@@ -27,7 +27,10 @@ from flashdet.cfg import get_config
 from flashdet.models import FlashDet
 from flashdet.models.lora import apply_lora, apply_qlora, merge_lora_weights, get_lora_state_dict
 from flashdet.data import create_dataloader, verify_dataset, verify_training_data
-from flashdet.utils import save_checkpoint, load_checkpoint, save_inference_weights, setup_logger, AverageMeter
+from flashdet.utils import (
+    save_checkpoint, load_checkpoint, save_inference_weights, setup_logger,
+    AverageMeter, safe_torch_load,
+)
 from flashdet.utils.metrics import compute_map
 from flashdet.utils.torchtune_optim import (
     apply_activation_checkpointing,
@@ -256,17 +259,39 @@ def _save_training_plots(history, plots_dir):
 
 
 def _save_training_csv(history, csv_path):
-    """Save training history to a CSV file."""
+    """Save training history to a CSV file.
+
+    Training metrics are recorded every epoch, but validation metrics are only
+    recorded on validation epochs (``val_interval``).  Validation series must
+    therefore be aligned by epoch number instead of by list index; otherwise
+    every validation after the first few epochs is written as a blank cell.
+    """
     import csv
-    max_len = max(len(v) for v in history.values())
+
+    val_keys = {"val_loss", "mAP@0.5", "val_box", "val_cls", "val_l1", "val_epoch"}
+    val_by_epoch = {}
+    val_epochs = history.get("val_epoch", [])
+    for i, raw_epoch in enumerate(val_epochs):
+        epoch_key = int(round(float(raw_epoch)))
+        val_by_epoch[epoch_key] = {}
+        for key in val_keys:
+            vals = history.get(key, [])
+            val_by_epoch[epoch_key][key] = vals[i] if i < len(vals) else None
+
+    epochs = history.get("epoch", [])
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(history.keys())
-        for i in range(max_len):
+        for i, raw_epoch in enumerate(epochs):
+            epoch_key = int(round(float(raw_epoch)))
             row = []
             for key in history:
-                vals = history[key]
-                row.append(f"{vals[i]:.6f}" if i < len(vals) else "")
+                if key in val_keys:
+                    value = val_by_epoch.get(epoch_key, {}).get(key)
+                else:
+                    vals = history.get(key, [])
+                    value = vals[i] if i < len(vals) else None
+                row.append(f"{value:.6f}" if value is not None else "")
             writer.writerow(row)
 
 
@@ -292,8 +317,12 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
 
     zero_pos_batches = 0
     total_batches = 0
+    grad_clip_norm = getattr(config.train, "grad_clip_norm", 10.0)
 
-    multi_scale_sizes = [256, 288, 320, 352, 384, 416] if getattr(config, 'multi_scale', False) else None
+    multi_scale_sizes = (
+        list(getattr(config.train, "multi_scale_sizes", [256, 288, 320, 352, 384, 416]))
+        if getattr(config.train, "multi_scale", False) else None
+    )
     current_ms_size = None
 
     for batch_idx, (images, gt_meta) in enumerate(dataloader):
@@ -342,11 +371,11 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(dataloader):
             if scaler:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(raw_model.parameters(), 10.0)
+                torch.nn.utils.clip_grad_norm_(raw_model.parameters(), grad_clip_norm)
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                torch.nn.utils.clip_grad_norm_(raw_model.parameters(), 10.0)
+                torch.nn.utils.clip_grad_norm_(raw_model.parameters(), grad_clip_norm)
                 optimizer.step()
             optimizer.zero_grad()
 
@@ -414,7 +443,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
 
 @torch.no_grad()
 def validate(model, dataloader, device, logger, ema=None, class_names=None,
-             epoch=0, total_epochs=100):
+             epoch=0, total_epochs=100, score_thr=0.01, max_det=300):
     """
     Validate model — computes both loss and mAP@0.5.
 
@@ -451,7 +480,9 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None,
             v = val.item() if hasattr(val, "item") else val
             sub_meters[key].update(v)
 
-        results = eval_model.predict(images, None, score_thr=0.01)
+        results = eval_model.predict(
+            images, None, score_thr=score_thr, max_det=max_det
+        )
 
 
         for i, (dets, lbs) in enumerate(results):
@@ -471,7 +502,7 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None,
             all_gts.append({"boxes": gt_boxes, "labels": gt_labels})
 
     # ---- mAP @IoU=0.5 ----
-    num_cls = len(class_names) if class_names else 10
+    num_cls = len(class_names) if class_names else getattr(eval_model, "num_classes", 80)
     map_results = compute_map(all_preds, all_gts, iou_threshold=0.5, num_classes=num_cls)
     map50 = map_results["mAP"]
 
@@ -519,8 +550,19 @@ def main():
     parser.add_argument("--model-size", default="n", choices=["u", "p", "n", "s", "m", "l", "x"],
                         help="Model size: u (~234K micro), p (~298K pico), n (~1.5M), s (~5.4M), m (~18M), l, x")
     parser.add_argument("--backbone", default="lite",
-                        choices=["lite", "pico_v2"],
-                        help="Pico backbone: lite (LiteBackbone), pico_v2 (PicoBackbone)")
+                        help="Pico backbone. Legacy: lite (ShuffleNetV2), pico_v2 (RepNeXt). "
+                             "Or any Pico-Zoo name: repvit, mobileone, fastvit, repghostnet, "
+                             "edgenext, mobilevitv2, efficientformerv2, shvit, efficientvit, "
+                             "swiftformer, efficientnetv2, emo, fasternet, starnet, mobilenetv4, "
+                             "ghostnetv2, mobilemamba, efficientvmamba, mambavision, mambaout, "
+                             "efficientvim, pp_lcnet, lcnet, esnet, pp_lcnetv2, peleenet, "
+                             "shufflenetv2, inceptionnext, unireplknet, convnextv2, efficientrep, "
+                             "rexnet, mobileformer, edgevit, tinyvit, levit, lowformer, localmamba, "
+                             "vmamba, plainmamba.")
+    parser.add_argument("--neck", default=None,
+                        help="Pico neck family: pan, rep, ghost, attention, mamba, lcnet. "
+                             "You can also pass a backbone name (e.g. edgenext) and the matching "
+                             "neck family is selected. Default: match the backbone family.")
     parser.add_argument("--architecture", default="flashdet",
                         choices=["flashdet", "yolov8", "yolov9", "yolov10", "yolov11", "yolox"],
                         help="Detection architecture (default: flashdet)")
@@ -548,6 +590,32 @@ def main():
                         help="Gradient accumulation steps (effective batch = batch_size * grad_accum)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducibility")
+
+    # --- Scheduler / EMA / calibration (overrides config defaults) ---
+    calib = parser.add_argument_group("scheduler & calibration")
+    calib.add_argument("--nbs", type=int, default=None,
+                       help="Nominal batch size for LR scaling (default: config, 64)")
+    calib.add_argument("--lrf", type=float, default=None,
+                       help="Final LR fraction for cosine schedule (default: config, 0.1)")
+    calib.add_argument("--grad-clip-norm", type=float, default=None,
+                       help="Gradient clipping norm (default: config, 10.0)")
+    calib.add_argument("--ema-decay", type=float, default=None,
+                       help="EMA target decay (default: config, 0.9998)")
+    calib.add_argument("--ema-warmup", type=int, default=None,
+                       help="EMA warmup updates (default: config, 2000)")
+    calib.add_argument("--val-score-thr", type=float, default=None,
+                       help="Score threshold used during validation mAP (default: config, 0.01)")
+    calib.add_argument("--max-det", type=int, default=None,
+                       help="Max detections per image at validation (default: config, 300)")
+    calib.add_argument("--multi-scale-sizes", nargs="+", type=int, default=None,
+                       help="Input sizes sampled by --multi-scale (default: 256 288 320 352 384 416)")
+    calib.add_argument("--neck-channels", type=int, default=None,
+                       help="Override Pico neck width (default: config, 80)")
+    calib.add_argument("--pico-stem-channels", type=int, default=None,
+                       help="Override Pico backbone stem width (default: architecture preset)")
+    calib.add_argument("--pico-stage-depths", nargs=3, type=int, default=None,
+                       metavar=("D0", "D1", "D2"),
+                       help="Override Pico backbone stage depths (default: architecture preset)")
 
     # --- torchtune-inspired training optimizations ---
     tt_group = parser.add_argument_group("torchtune optimizations",
@@ -603,6 +671,7 @@ def main():
 
     args = parser.parse_args()
 
+    yaml_cfg = None
     if args.config:
         from flashdet.cfg import load_yaml_config
         yaml_cfg = load_yaml_config(args.config)
@@ -617,6 +686,10 @@ def main():
             args.input_size = yaml_cfg.model.input_size
         if args.model_size == defaults.model_size and hasattr(yaml_cfg, "model") and hasattr(yaml_cfg.model, "size"):
             args.model_size = yaml_cfg.model.size
+        if args.backbone == defaults.backbone and hasattr(yaml_cfg, "model") and hasattr(yaml_cfg.model, "backbone_type"):
+            args.backbone = yaml_cfg.model.backbone_type
+        if args.neck is None and hasattr(yaml_cfg, "model") and hasattr(yaml_cfg.model, "neck_type"):
+            args.neck = yaml_cfg.model.neck_type
         if args.architecture == defaults.architecture and hasattr(yaml_cfg, "model") and hasattr(yaml_cfg.model, "architecture"):
             args.architecture = yaml_cfg.model.architecture
         if args.weight_decay == defaults.weight_decay and hasattr(yaml_cfg, "train") and hasattr(yaml_cfg.train, "weight_decay"):
@@ -660,7 +733,39 @@ def main():
                 requested_device,
             )
     
-    config = get_config()
+    config = yaml_cfg if yaml_cfg is not None else get_config()
+
+    # Keep the resolved model/input values in sync with CLI/config.
+    config.model.size = model_size
+    config.model.input_size = input_size
+    config.model.architecture = getattr(args, "architecture", "flashdet")
+
+    # Optional scheduler / calibration overrides.
+    for arg_name, cfg_name in (
+        ("nbs", "nbs"),
+        ("lrf", "lrf"),
+        ("grad_clip_norm", "grad_clip_norm"),
+        ("ema_decay", "ema_decay"),
+        ("ema_warmup", "ema_warmup"),
+        ("val_score_thr", "val_score_thr"),
+        ("max_det", "max_det"),
+    ):
+        value = getattr(args, arg_name, None)
+        if value is not None:
+            setattr(config.train, cfg_name, value)
+    if getattr(args, "multi_scale", False):
+        config.train.multi_scale = True
+    if args.multi_scale_sizes is not None:
+        config.train.multi_scale_sizes = list(args.multi_scale_sizes)
+    # 50 is the argparse default; only override YAML when the user changed it.
+    if args.patience != 50:
+        config.train.patience = args.patience
+    if args.neck_channels is not None:
+        config.model.pico_neck_channels = args.neck_channels
+    if args.pico_stem_channels is not None:
+        config.model.pico_stem_channels = args.pico_stem_channels
+    if args.pico_stage_depths is not None:
+        config.model.pico_stage_depths = tuple(args.pico_stage_depths)
 
     # Override data paths from CLI if provided
     if args.train_images:
@@ -684,6 +789,8 @@ def main():
         class_names = config.class_names
     colors = _make_color_palette(len(class_names))
     num_classes = len(class_names)
+    config.model.num_classes = num_classes
+    config.class_names = class_names
 
     logger.info("=" * 60)
     logger.info("FlashDet Training")
@@ -778,15 +885,30 @@ def main():
     logger.info("\nBuilding model...")
     arch = getattr(args, "architecture", "flashdet")
     if arch in ("flashdet", ""):
+        pico_kwargs = {}
+        if model_size == "p":
+            pico_kwargs["neck_channels"] = config.model.pico_neck_channels
+            if config.model.pico_stem_channels is not None:
+                pico_kwargs["stem_channels"] = config.model.pico_stem_channels
+            if config.model.pico_stage_depths is not None:
+                pico_kwargs["stage_depths"] = tuple(config.model.pico_stage_depths)
+
         model = FlashDet(
             num_classes=num_classes,
             size=model_size,
             total_epochs=args.epochs,
+            strides=tuple(config.model.strides),
             backbone_type=getattr(args, "backbone", "lite"),
+            neck_type=getattr(args, "neck", None),
+            **pico_kwargs,
         ).to(device)
 
         info = model.get_model_info()
         logger.info(f"Model: {info['name']}")
+        logger.info(
+            f"Pico selectors: backbone={getattr(model, 'backbone_type', 'n/a')} "
+            f"neck={getattr(model, 'neck_type', 'n/a')}"
+        )
         logger.info(f"Inference params: {info['inference_params']:,} "
                     f"({info['inference_params_mb']:.2f} MB FP32, "
                     f"{info['inference_fp16_mb']:.2f} MB FP16)")
@@ -838,7 +960,7 @@ def main():
     # Fine-tune from a previous checkpoint (inference or training)
     if args.finetune and not args.resume:
         logger.info(f"\nLoading fine-tune weights from: {args.finetune}")
-        ckpt = torch.load(args.finetune, map_location=device, weights_only=False)
+        ckpt = safe_torch_load(args.finetune, map_location=device)
         src_sd = ckpt.get("model_state_dict", ckpt)
         src_sd = {k: v.float() if v.is_floating_point() else v for k, v in src_sd.items()}
         model_sd = model.state_dict()
@@ -914,7 +1036,7 @@ def main():
         log_memory_stats(device, prefix="Pre-optimizer")
 
     # Optimizer and scheduler — auto-scale LR with effective batch size
-    nbs = 64  # nominal batch size for base LR
+    nbs = getattr(config.train, "nbs", 64)  # nominal batch size for base LR
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     effective_bs = args.batch_size * grad_accum * world_size
     lr_scale = effective_bs / nbs
@@ -961,7 +1083,7 @@ def main():
         )
 
     # LR schedule: linear warmup + cosine annealing
-    lrf = 0.1  # final LR = 10% of peak (was 0.01 = 1%, too aggressive)
+    lrf = getattr(config.train, "lrf", 0.1)
     warmup_epochs = args.warmup_epochs
 
     def lf(epoch):
@@ -1014,8 +1136,10 @@ def main():
         logger.info("torchtune optimizations: none (use --help to see options)")
 
     # EMA with adaptive warmup (always on the raw unwrapped model)
-    ema = ModelEMA(raw_model, decay=0.9998, warmup=2000)
-    logger.info(f"EMA enabled (target_decay=0.9998, warmup=2000, "
+    ema_decay = getattr(config.train, "ema_decay", 0.9998)
+    ema_warmup = getattr(config.train, "ema_warmup", 2000)
+    ema = ModelEMA(raw_model, decay=ema_decay, warmup=ema_warmup)
+    logger.info(f"EMA enabled (target_decay={ema_decay}, warmup={ema_warmup}, "
                 f"~{len(train_loader)*5} iters in first 5 epochs)")
 
     # Resume
@@ -1030,7 +1154,7 @@ def main():
         best_loss = ckpt.get("loss", float("inf"))
         # Restore EMA state if saved
         try:
-            raw = torch.load(args.resume, map_location=device, weights_only=False)
+            raw = safe_torch_load(args.resume, map_location=device)
         except Exception as e:
             logger.warning("Could not load checkpoint file for EMA/extra state: %s", e)
             raw = {}
@@ -1039,7 +1163,7 @@ def main():
             logger.info(f"EMA state restored (num_updates={ema.num_updates}, "
                         f"current_decay={ema.decay:.6f})")
         else:
-            ema = ModelEMA(raw_model, decay=0.9998, warmup=2000)
+            ema = ModelEMA(raw_model, decay=ema_decay, warmup=ema_warmup)
             logger.info("EMA warm-started from checkpoint weights")
         logger.info(f"Resumed from epoch {start_epoch}")
         if scheduler is not None:
@@ -1060,13 +1184,18 @@ def main():
         "model_size": model_size,
         "class_names": class_names,
         "architecture": arch,
+        # Pico-only selectors. Saving these is required so inference/export
+        # rebuilds the exact same backbone and neck.
+        "backbone_type": getattr(raw_model, "backbone_type", getattr(args, "backbone", "lite")),
+        "neck_type": getattr(raw_model, "neck_type", getattr(args, "neck", None)),
     }
 
     # Iteration-based warmup
     nb = len(train_loader)
-    nw = max(round(args.warmup_epochs * nb), 100) if args.warmup_epochs > 0 else -1
-    warmup_momentum = 0.8
-    base_momentum = 0.937
+    warmup_min_iters = getattr(config.train, "warmup_min_iters", 100)
+    nw = max(round(args.warmup_epochs * nb), warmup_min_iters) if args.warmup_epochs > 0 else -1
+    warmup_momentum = getattr(config.train, "warmup_momentum", 0.8)
+    base_momentum = getattr(config.train, "base_momentum", 0.937)
 
     # Training loop
     logger.info("\nStarting training...")
@@ -1164,6 +1293,8 @@ def main():
             val_loss, map50, val_sub = validate(
                 raw_model, val_loader, device, logger, ema=ema, class_names=class_names,
                 epoch=epoch, total_epochs=args.epochs,
+                score_thr=getattr(config.train, "val_score_thr", 0.01),
+                max_det=getattr(config.train, "max_det", 300),
             )
 
             # Record validation metrics to history
@@ -1210,10 +1341,11 @@ def main():
                 )
 
             # Early stopping
-            if args.patience > 0 and epochs_without_improvement >= args.patience:
+            patience = getattr(config.train, "patience", args.patience)
+            if patience > 0 and epochs_without_improvement >= patience:
                 logger.info(
                     f"\nEarly stopping triggered: no mAP improvement for "
-                    f"{epochs_without_improvement} epochs (patience={args.patience})"
+                    f"{epochs_without_improvement} epochs (patience={patience})"
                 )
                 break
 

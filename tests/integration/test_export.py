@@ -1,7 +1,6 @@
 """Integration tests — model export (ONNX)."""
 
 import os
-import tempfile
 
 import pytest
 import torch
@@ -69,7 +68,6 @@ class TestONNXExport:
         torch.onnx.export(model, dummy, onnx_path, input_names=["images"], opset_version=13)
 
         session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
-        import numpy as np
         result = session.run(None, {"images": dummy.numpy()})
         assert result is not None
         assert len(result) > 0
