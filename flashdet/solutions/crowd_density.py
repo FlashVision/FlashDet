@@ -77,8 +77,8 @@ class CrowdDensity(BaseSolution):
                 continue
             cx = (row[0] + row[2]) / 2
             cy = (row[1] + row[3]) / 2
-            ci = min(int(cy / cell_h), self.grid_rows - 1)
-            cj = min(int(cx / cell_w), self.grid_cols - 1)
+            ci = max(0, min(int(cy / cell_h), self.grid_rows - 1))
+            cj = max(0, min(int(cx / cell_w), self.grid_cols - 1))
             grid[ci, cj] += 1
 
         self._last_grid = grid

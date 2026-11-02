@@ -72,14 +72,16 @@ class ObjectCounter(BaseSolution):
             self._track_history[tid].append((cx, cy))
 
             side = self._point_side(cx, cy)
-            if tid in self._side_map:
-                prev_side = self._side_map[tid]
-                if prev_side != side and prev_side != 0 and side != 0:
-                    if side > 0:
-                        self.in_count += 1
-                    else:
-                        self.out_count += 1
-            self._side_map[tid] = side
+            prev_side = self._side_map.get(tid, 0)
+            if prev_side != 0 and side != 0 and prev_side != side:
+                if side > 0:
+                    self.in_count += 1
+                else:
+                    self.out_count += 1
+            # Keep the last non-zero side so an exact-on-line frame does not
+            # erase the crossing state.
+            if side != 0:
+                self._side_map[tid] = side
 
             cv2.rectangle(annotated, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
             cv2.putText(

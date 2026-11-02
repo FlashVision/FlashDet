@@ -63,11 +63,29 @@ class YOLOv8(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        gt_meta: Dict = None,
+        compute_loss: bool = False,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
         features = self.backbone(x)
         features = self.neck(features)
         preds = [self.heads[i](feat) for i, feat in enumerate(features)]
-        return {"preds": preds}
+        result = {"preds": preds}
+
+        if (self.training or compute_loss) and gt_meta is not None:
+            from flashdet.losses.yolo_loss import compute_yolo_loss
+
+            gt_meta["input_h"] = x.shape[2]
+            loss, states = compute_yolo_loss(
+                preds, gt_meta, self.num_classes, reg_max=self.reg_max,
+            )
+            result["loss"] = loss
+            result["loss_states"] = states
+
+        return result
 
     @torch.no_grad()
     def predict(self, x: torch.Tensor, img_metas=None,

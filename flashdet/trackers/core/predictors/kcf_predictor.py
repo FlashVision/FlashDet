@@ -153,8 +153,10 @@ class KCFPredictor(BasePredictor):
         response = _ifft2(self._alpha * kzx)
         peak = np.unravel_index(response.argmax(), response.shape)
 
-        dy = peak[0] - fh // 2
-        dx = peak[1] - fw // 2
+        # The Gaussian label peaks at index (0, 0), so convert the wrapped
+        # response peak to a signed displacement around the patch centre.
+        dy = peak[0] if peak[0] <= fh // 2 else peak[0] - fh
+        dx = peak[1] if peak[1] <= fw // 2 else peak[1] - fw
         dx *= self._cell_size
         dy *= self._cell_size
 

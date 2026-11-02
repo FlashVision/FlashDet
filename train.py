@@ -843,7 +843,9 @@ def main():
         input_size=input_size,
         num_workers=args.workers,
         is_train=False,
-        distributed=use_ddp,
+        # Validation runs on the main rank only; a DistributedSampler would
+        # make it score just 1/world_size of the validation set.
+        distributed=False,
     )
     
     if args.subset < 1.0:
@@ -923,6 +925,11 @@ def main():
     else:
         from flashdet.models.detector import build_model
         config.model.num_classes = num_classes
+        if arch == "yolox":
+            raise NotImplementedError(
+                "YOLOX training is not implemented in this codebase yet; "
+                "YOLOX is supported for inference/export only."
+            )
         model = build_model(config, architecture=arch).to(device)
         total_params = sum(p.numel() for p in model.parameters())
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -998,6 +1005,12 @@ def main():
 
     # Gradient accumulation
     grad_accum = max(1, args.grad_accum)
+    if args.optimizer_in_bwd and (args.amp or grad_accum > 1):
+        logger.warning(
+            "--optimizer-in-bwd is incompatible with AMP/gradient accumulation; "
+            "disabling it for this run."
+        )
+        args.optimizer_in_bwd = False
     if grad_accum > 1:
         logger.info(f"Gradient Accumulation: {grad_accum} steps "
                     f"(effective batch = {args.batch_size * grad_accum})")
@@ -1294,6 +1307,7 @@ def main():
 
         # Validate at configured interval
         val_interval = getattr(config.train, "val_interval", 1)
+        should_stop = False
         # Only rank 0 runs validation and saves checkpoints in DDP.
         if is_main and (epoch + 1) % val_interval == 0:
             val_loss, map50, val_sub = validate(
@@ -1353,7 +1367,7 @@ def main():
                     f"\nEarly stopping triggered: no mAP improvement for "
                     f"{epochs_without_improvement} epochs (patience={patience})"
                 )
-                break
+                should_stop = True
 
             # ---- Update training graphs ----
             try:
@@ -1361,6 +1375,14 @@ def main():
                 _save_training_csv(history, os.path.join(args.save_dir, "training_log.csv"))
             except Exception as e:
                 logger.warning(f"Failed to save training plots: {e}")
+
+        # Keep all DDP ranks in sync when rank 0 decides to stop.
+        if use_ddp:
+            stop_tensor = torch.tensor([1 if should_stop else 0], device=device)
+            dist.broadcast(stop_tensor, src=0)
+            should_stop = bool(stop_tensor.item())
+        if should_stop:
+            break
 
         # Save latest checkpoint (EMA state included in one atomic write)
         if is_main:
@@ -1449,7 +1471,7 @@ def main():
         "history": {
             "train_loss": history.get("train_loss", []),
             "val_loss": history.get("val_loss", []),
-            "mAP50": history.get("mAP50", []),
+            "mAP50": history.get("mAP@0.5", []),
         },
     }
     results_path = os.path.join(args.save_dir, "results.json")

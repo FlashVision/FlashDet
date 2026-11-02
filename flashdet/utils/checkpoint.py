@@ -9,6 +9,15 @@ from typing import Dict
 import torch
 
 
+def _state_dict_for_save(model: torch.nn.Module) -> Dict:
+    """Strip torch.compile prefixes so checkpoints remain loadable."""
+    state = model.state_dict()
+    return {
+        k.replace("_orig_mod.", "", 1): v
+        for k, v in state.items()
+    }
+
+
 def _unsafe_load_allowed(allow_unsafe) -> bool:
     if allow_unsafe is None:
         return os.environ.get("FLASHDET_ALLOW_UNSAFE_LOAD", "0").lower() in (
@@ -127,7 +136,7 @@ def save_checkpoint(
 
     checkpoint = {
         "epoch": epoch,
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": _state_dict_for_save(model),
         "optimizer_state_dict": optimizer.state_dict(),
         "loss": loss,
         "metrics": metrics or {},
@@ -172,7 +181,7 @@ def save_weights_only(
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     
     checkpoint = {
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": _state_dict_for_save(model),
     }
     
     if config is not None:
@@ -215,10 +224,10 @@ def save_inference_weights(
     """
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     
-    state_dict = model.state_dict()
+    state_dict = _state_dict_for_save(model)
     inference_state_dict = {
         k: v for k, v in state_dict.items()
-        if not k.startswith("aux_head.")
+        if not k.startswith(("aux_head.", "aux_heads.", "head.o2m_heads.", "o2m_heads."))
     }
     
     # Convert to FP16 if requested

@@ -81,7 +81,11 @@ class YOLOX(nn.Module):
         h, w = input_hw
         strides = [h // cls_preds[i].shape[2] for i in range(len(cls_preds))]
 
-        all_boxes, all_scores, all_labels = [], [], []
+        B = cls_preds[0].shape[0]
+        per_image_boxes = [[] for _ in range(B)]
+        per_image_scores = [[] for _ in range(B)]
+        per_image_labels = [[] for _ in range(B)]
+
         for i in range(len(cls_preds)):
             stride = strides[i]
             fh, fw = cls_preds[i].shape[2], cls_preds[i].shape[3]
@@ -105,29 +109,35 @@ class YOLOX(nn.Module):
             scores = (cls_out * obj_out)  # B, HW, nc
             max_scores, labels = scores.max(dim=-1)  # B, HW
 
-            # Filter by score
-            mask = max_scores[0] > score_thr
-            if mask.sum() == 0:
+            for b in range(B):
+                mask = max_scores[b] > score_thr
+                if mask.sum() == 0:
+                    continue
+                per_image_boxes[b].append(boxes[b][mask])
+                per_image_scores[b].append(max_scores[b][mask])
+                per_image_labels[b].append(labels[b][mask])
+
+        results = []
+        empty = torch.zeros(0, 5, device=cls_preds[0].device)
+        empty_labels = torch.zeros(0, dtype=torch.long, device=cls_preds[0].device)
+        for b in range(B):
+            if not per_image_boxes[b]:
+                results.append((empty, empty_labels))
                 continue
-            all_boxes.append(boxes[0][mask])
-            all_scores.append(max_scores[0][mask])
-            all_labels.append(labels[0][mask])
 
-        if not all_boxes:
-            empty = torch.zeros(0, 5, device=cls_preds[0].device)
-            return [(empty, torch.zeros(0, dtype=torch.long, device=cls_preds[0].device))]
+            boxes_cat = torch.cat(per_image_boxes[b], dim=0)
+            scores_cat = torch.cat(per_image_scores[b], dim=0)
+            labels_cat = torch.cat(per_image_labels[b], dim=0)
 
-        boxes_cat = torch.cat(all_boxes, dim=0)
-        scores_cat = torch.cat(all_scores, dim=0)
-        labels_cat = torch.cat(all_labels, dim=0)
+            keep = torchvision.ops.nms(boxes_cat, scores_cat, nms_thr)
+            boxes_cat = boxes_cat[keep]
+            scores_cat = scores_cat[keep]
+            labels_cat = labels_cat[keep]
 
-        keep = torchvision.ops.nms(boxes_cat, scores_cat, nms_thr)
-        boxes_cat = boxes_cat[keep]
-        scores_cat = scores_cat[keep]
-        labels_cat = labels_cat[keep]
+            dets = torch.cat([boxes_cat, scores_cat.unsqueeze(1)], dim=1)
+            results.append((dets, labels_cat))
 
-        dets = torch.cat([boxes_cat, scores_cat.unsqueeze(1)], dim=1)
-        return [(dets, labels_cat)]
+        return results
 
     def info(self) -> str:
         n_params = sum(p.numel() for p in self.parameters()) / 1e6

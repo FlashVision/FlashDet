@@ -101,9 +101,12 @@ class SemiSupervisedTrainer(Trainer):
 
         arch = self.architecture.lower()
         if arch in ("flashdet", ""):
-            size_key = {"m": "n", "m-0.5x": "n", "m-1.5x": "s"}.get(self.model_size, "n")
+            from flashdet.engine.training.trainer import resolve_flashdet_size
+            size_key = resolve_flashdet_size(self.model_size)
             self._teacher_model = FlashDet(
                 num_classes=num_classes, size=size_key, total_epochs=self.epochs,
+                backbone_type=getattr(cfg.model, "backbone_type", "lite"),
+                neck_type=getattr(cfg.model, "neck_type", None),
             ).to(self.device)
         else:
             cfg.model.num_classes = num_classes
@@ -127,6 +130,17 @@ class SemiSupervisedTrainer(Trainer):
                 self._logger.warning(f"No annotations at {unsup_ann}, running supervised only")
 
         return super().train()
+
+    def _post_build_model(self, raw_model: nn.Module) -> None:
+        """Initialise the frozen teacher from the freshly built student."""
+        super()._post_build_model(raw_model)
+        teacher = getattr(self, "_teacher_model", None)
+        if teacher is not None:
+            teacher.load_state_dict(raw_model.state_dict())
+            teacher.eval()
+            for p in teacher.parameters():
+                p.requires_grad = False
+            self._logger.info("Semi-supervised teacher initialised from student weights")
 
     @torch.no_grad()
     def _generate_pseudo_labels(
@@ -174,7 +188,7 @@ class SemiSupervisedTrainer(Trainer):
         output = model(images, pseudo_meta, epoch=epoch)
         return output.get("loss", torch.tensor(0.0, device=self.device))
 
-    def _train_one_epoch(self, model, dataloader, optimizer, epoch, ema, scaler):
+    def _train_one_epoch(self, model, dataloader, optimizer, epoch, ema, scaler, **kwargs):
         """Override to add semi-supervised pseudo-label training."""
         model.train()
         use_amp = scaler is not None

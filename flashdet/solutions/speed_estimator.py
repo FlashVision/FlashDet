@@ -51,9 +51,12 @@ class SpeedEstimator(BaseSolution):
         self.window = window
 
         self._track_history: Dict[int, deque] = defaultdict(lambda: deque(maxlen=window))
+        self._track_frames: Dict[int, deque] = defaultdict(lambda: deque(maxlen=window))
         self._speeds: Dict[int, float] = {}
+        self._frame_idx = 0
 
     def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[int, float]]:
+        self._frame_idx += 1
         detections = self._detect(frame)
         tracks = self.tracker.update(detections)
 
@@ -70,8 +73,10 @@ class SpeedEstimator(BaseSolution):
             cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
             history = self._track_history[tid]
             history.append((cx, cy))
+            frames = self._track_frames[tid]
+            frames.append(self._frame_idx)
 
-            speed = self._compute_speed(history)
+            speed = self._compute_speed(history, frames)
             self._speeds[tid] = speed
             frame_speeds[tid] = speed
 
@@ -98,15 +103,20 @@ class SpeedEstimator(BaseSolution):
     def reset(self):
         super().reset()
         self._track_history.clear()
+        self._track_frames.clear()
         self._speeds.clear()
+        self._frame_idx = 0
 
-    def _compute_speed(self, history: deque) -> float:
+    def _compute_speed(self, history: deque, frames: deque = None) -> float:
         if len(history) < 2:
             return 0.0
         p0 = np.array(history[0])
         p1 = np.array(history[-1])
         dist_px = float(np.linalg.norm(p1 - p0))
-        n_frames = len(history) - 1
+        if frames is not None and len(frames) >= 2:
+            n_frames = max(1, int(frames[-1] - frames[0]))
+        else:
+            n_frames = len(history) - 1
 
         if self.pixels_per_meter == 1.0:
             return dist_px / n_frames

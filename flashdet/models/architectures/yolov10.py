@@ -83,13 +83,24 @@ class YOLOv10(nn.Module):
         result: Dict = {"preds": o2m_preds}
 
         if (self.training or compute_loss) and gt_meta is not None:
-                from flashdet.losses.yolo_loss import compute_yolo_loss
-                gt_meta["input_h"] = x.shape[2]
-                loss, loss_states = compute_yolo_loss(
-                    o2m_preds, gt_meta, self.num_classes, reg_max=self.reg_max,
-                )
-                result["loss"] = loss
-                result["loss_states"] = loss_states
+            from flashdet.losses.yolo_loss import compute_yolo_loss
+
+            gt_meta["input_h"] = x.shape[2]
+            o2m_loss, o2m_states = compute_yolo_loss(
+                o2m_preds, gt_meta, self.num_classes, reg_max=self.reg_max,
+            )
+            o2o_preds = [h(f) for h, f in zip(self.o2o_heads, neck_feats)]
+            o2o_loss, o2o_states = compute_yolo_loss(
+                o2o_preds, gt_meta, self.num_classes, reg_max=self.reg_max,
+            )
+            # Both heads must learn; inference uses the o2o head.
+            result["loss"] = o2m_loss + o2o_loss
+            result["loss_states"] = {
+                "loss_cls": o2m_states["loss_cls"] + o2o_states["loss_cls"],
+                "loss_reg": o2m_states["loss_reg"] + o2o_states["loss_reg"],
+                "o2m_loss": o2m_loss.detach(),
+                "o2o_loss": o2o_loss.detach(),
+            }
 
         return result
 

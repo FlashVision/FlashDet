@@ -352,6 +352,11 @@ class Trainer:
             ).to(self.device)
         else:
             cfg.model.num_classes = num_classes
+            if arch == "yolox":
+                raise NotImplementedError(
+                    "YOLOX training is not implemented in this codebase yet; "
+                    "YOLOX is supported for inference/export only."
+                )
             model = build_model(cfg, architecture=arch).to(self.device)
             self._logger.info(f"Architecture: {arch}")
 

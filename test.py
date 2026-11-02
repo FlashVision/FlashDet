@@ -275,7 +275,11 @@ class FlashDetDetector:
         tensor, meta = self.transform(rgb)
         tensor = torch.from_numpy(tensor).unsqueeze(0).to(self.device)
 
-        results = self.model.predict(tensor, None, score_thr=self.conf_thresh)
+        results = self.model.predict(
+            tensor, None,
+            score_thr=self.conf_thresh,
+            nms_thr=self.nms_thresh,
+        )
 
         warp_matrix = meta["warp_matrix"]
         inv_warp = np.linalg.inv(warp_matrix)

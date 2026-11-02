@@ -137,9 +137,9 @@ class DeepSortTracker:
         )
 
         # Stage 2: IoU matching on tentative tracks + remaining unmatched
+        matched_confirmed = {t for _, t in matched}
         candidate_trks = tentative + [
-            i for i in confirmed if i not in {t for _, t in matched}
-            and self._tracks[i].time_since_update == 1
+            i for i in confirmed if i not in matched_confirmed
         ]
         iou_updated: set = set()
         if len(unmatched_dets) > 0 and len(candidate_trks) > 0:
@@ -243,8 +243,13 @@ class DeepSortTracker:
                     if gate[t_gate_idx, d_idx] == np.inf:
                         cost[j, i] = 1e5
 
+            threshold = (
+                self.max_cosine_distance
+                if embeddings is not None
+                else 1.0 - self.iou_threshold
+            )
             matched, udet_local, _ = linear_assignment(
-                cost, threshold=self.max_cosine_distance,
+                cost, threshold=threshold,
             )
 
             for d_local, t_local in matched:

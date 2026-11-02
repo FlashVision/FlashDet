@@ -49,11 +49,13 @@ class Heatmap(BaseSolution):
         self.radius = radius
         self.decay = decay
         self._heat: Optional[np.ndarray] = None
+        self._heat_peak: float = 0.0
 
     def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         h, w = frame.shape[:2]
-        if self._heat is None:
+        if self._heat is None or self._heat.shape != (h, w):
             self._heat = np.zeros((h, w), dtype=np.float64)
+            self._heat_peak = 0.0
 
         centres = self._get_centres(frame)
         self._heat *= self.decay
@@ -62,6 +64,9 @@ class Heatmap(BaseSolution):
             ix, iy = int(round(cx)), int(round(cy))
             cv2.circle(self._heat, (ix, iy), self.radius, 1.0, -1)
 
+        # Decay the normalisation peak as well; otherwise decay cancels out
+        # when dividing by the current maximum.
+        self._heat_peak = max(self._heat_peak * self.decay, float(self._heat.max()))
         heatmap_bgr = self._normalize_heat()
         overlay = cv2.addWeighted(frame, 0.6, heatmap_bgr, 0.4, 0)
         return overlay, heatmap_bgr
@@ -81,6 +86,7 @@ class Heatmap(BaseSolution):
     def reset(self):
         super().reset()
         self._heat = None
+        self._heat_peak = 0.0
 
     def _get_centres(self, frame: np.ndarray) -> List[Tuple[float, float]]:
         detections = self._detect(frame)
@@ -102,9 +108,9 @@ class Heatmap(BaseSolution):
 
     def _normalize_heat(self) -> np.ndarray:
         norm = self._heat.copy()
-        max_val = norm.max()
+        max_val = max(self._heat_peak, float(norm.max()))
         if max_val > 0:
-            norm = (norm / max_val * 255).astype(np.uint8)
+            norm = np.clip(norm / max_val * 255, 0, 255).astype(np.uint8)
         else:
             norm = norm.astype(np.uint8)
         return cv2.applyColorMap(norm, self.colormap)

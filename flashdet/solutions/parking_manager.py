@@ -46,7 +46,9 @@ class ParkingManager(BaseSolution):
     ):
         super().__init__(predictor, tracker, classes)
         self._ensure_tracker()
-        self.parking_spots: List[np.ndarray] = parking_spots or []
+        self.parking_spots: List[np.ndarray] = [
+            np.asarray(p, dtype=np.int32) for p in (parking_spots or [])
+        ]
         self.occupancy_threshold = occupancy_threshold
 
         self._spot_status: Dict[int, bool] = {}
@@ -56,11 +58,17 @@ class ParkingManager(BaseSolution):
         """Add a parking spot polygon and return its index."""
         polygon = np.asarray(polygon, dtype=np.int32)
         idx = spot_id if spot_id is not None else len(self.parking_spots)
+        if idx < 0:
+            raise ValueError("spot_id must be >= 0")
         if idx < len(self.parking_spots):
             self.parking_spots[idx] = polygon
-        else:
+        elif idx == len(self.parking_spots):
             self.parking_spots.append(polygon)
-            idx = len(self.parking_spots) - 1
+        else:
+            raise ValueError(
+                f"spot_id={idx} would leave gaps; add spots contiguously "
+                f"(next id is {len(self.parking_spots)})"
+            )
         return idx
 
     def load_spots(self, path: Union[str, Path]):

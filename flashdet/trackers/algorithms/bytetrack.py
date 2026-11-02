@@ -96,7 +96,12 @@ class ByteTracker:
             self._tracks[t].update(dets_high[d])
 
         # Stage 2: low-confidence detections → remaining tracks
-        remaining_tracks = [self._tracks[t] for t in unmatched_trks]
+        # ByteTrack's low-score stage only revives tracks from the previous
+        # frame, not long-lost identities.
+        remaining_tracks = [
+            self._tracks[t] for t in unmatched_trks
+            if self._tracks[t].time_since_update == 1
+        ]
         matched_2, _, _ = self._match(
             dets_low, remaining_tracks, self.low_iou_threshold,
         )

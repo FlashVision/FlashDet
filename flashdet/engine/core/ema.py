@@ -4,6 +4,7 @@ Single source of truth — imported by ``train.py``, ``Trainer``, etc.
 """
 
 import copy
+import math
 
 import torch
 import torch.nn as nn
@@ -13,14 +14,14 @@ class ModelEMA:
     """Exponential Moving Average of model weights with adaptive decay warmup.
 
     Uses an adaptive decay schedule so the EMA converges quickly even with
-    small datasets (few batches/epoch).  The effective decay ramps from ~0
-    (EMA = model copy) up to *target_decay* over the first few thousand
+    small datasets (few batches/epoch).  The effective decay ramps from 0
+    (EMA = model copy) toward *target_decay* over the first few thousand
     updates, using::
 
-        effective_decay = min(target_decay, (1 + n) / (warmup + n))
+        effective_decay = target_decay * (1 - exp(-n / warmup))
 
-    With the default warmup=2000, the decay reaches 0.9998 at ~10 000
-    updates.
+    With the default warmup=2000, the decay is ~0.63 * target after 2000
+    updates and ~0.99 * target after 10 000 updates.
 
     Args:
         model: The model whose weights will be averaged.
@@ -39,8 +40,9 @@ class ModelEMA:
 
     @property
     def decay(self):
-        return min(self.target_decay,
-                   (1 + self.num_updates) / (self.warmup + self.num_updates))
+        if self.warmup <= 0:
+            return self.target_decay
+        return self.target_decay * (1.0 - math.exp(-self.num_updates / self.warmup))
 
     @torch.no_grad()
     def update(self, model: nn.Module):

@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from flashdet.cfg import get_config
 from flashdet.models import FlashDet
+from flashdet.models.detector import build_model
 from flashdet.data import create_dataloader
 from flashdet.utils import AverageMeter
 from flashdet.utils.checkpoint import safe_torch_load
@@ -58,7 +59,10 @@ class Validator:
 
         if model is not None:
             self.model = model.to(self.device)
-            self.class_names = list(cfg.class_names)
+            class_names = list(getattr(model, "class_names", []) or cfg.class_names)
+            if not class_names:
+                class_names = [f"class_{i}" for i in range(getattr(model, "num_classes", 0))]
+            self.class_names = class_names
         elif model_path is not None:
             self.model, self.class_names = self._load_model(model_path, cfg)
         else:
@@ -87,20 +91,48 @@ class Validator:
             if "class_names" in ckpt_cfg and ckpt_cfg["class_names"]:
                 class_names = ckpt_cfg["class_names"]
 
-        model = FlashDet(
-            num_classes=num_classes,
-            size=size,
-            backbone_type=backbone_type,
-            neck_type=neck_type,
-        )
+        arch = "flashdet"
+        if "config" in checkpoint:
+            arch = checkpoint["config"].get("architecture", arch).lower()
+
+        if arch in ("flashdet", ""):
+            model = FlashDet(
+                num_classes=num_classes,
+                size=size,
+                backbone_type=backbone_type,
+                neck_type=neck_type,
+            )
+        else:
+            model_cfg = get_config(model_size=size, num_classes=num_classes)
+            model_cfg.model.architecture = arch
+            model_cfg.model.size = size
+            ckpt_cfg = checkpoint.get("config", {})
+            model_cfg.model.width_mult = ckpt_cfg.get("width_mult", 1.0)
+            model_cfg.model.depth_mult = ckpt_cfg.get("depth_mult", 1.0)
+            model_cfg.model.reg_max = ckpt_cfg.get("reg_max", 16)
+            model = build_model(model_cfg, architecture=arch)
 
         if "model_state_dict" in checkpoint:
-            model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+            sd = checkpoint["model_state_dict"]
         elif "state_dict" in checkpoint:
             sd = {k.replace("model.", ""): v for k, v in checkpoint["state_dict"].items()}
-            model.load_state_dict(sd, strict=False)
         else:
-            model.load_state_dict(checkpoint, strict=False)
+            sd = checkpoint
+
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        if len(missing) == len(model.state_dict()):
+            raise RuntimeError(
+                f"Checkpoint {model_path!r} does not match the rebuilt "
+                f"{arch} model: no tensors were loaded."
+            )
+        # Inference checkpoints intentionally omit the one-to-many training head.
+        ignored = ("aux_head.", "aux_heads.", "head.o2m_heads.", "o2m_heads.")
+        real_missing = [k for k in missing if not k.startswith(ignored)]
+        if real_missing or unexpected:
+            logger.warning(
+                "Checkpoint loaded with %d missing and %d unexpected keys",
+                len(real_missing), len(unexpected),
+            )
 
         model = model.to(self.device).eval()
         return model, class_names
@@ -164,7 +196,7 @@ class Validator:
                 all_preds.append({"boxes": boxes_np, "scores": scores_np, "labels": lbs_np})
                 all_gts.append({"boxes": gt_boxes, "labels": gt_labels})
 
-        num_cls = len(self.class_names)
+        num_cls = len(self.class_names) or getattr(self.model, "num_classes", 1)
         map_results = compute_map(
             all_preds, all_gts,
             iou_threshold=self.iou_threshold,

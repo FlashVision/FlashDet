@@ -19,6 +19,9 @@ python scripts/create_synthetic_dataset.py \
   --output /tmp/synth10 --train 1000 --val 200 --size 192 --classes 10
 ```
 
+> mAP values below were recomputed after fixing the COCO matcher (duplicate
+> detections can no longer steal a second, unmatched GT).
+
 ## Results
 
 ### 5 epochs
@@ -36,12 +39,12 @@ python scripts/create_synthetic_dataset.py \
 
 | Model | Best mAP@0.5 | Best val loss | Approx. train time |
 |---|---:|---:|---:|
-| FlashDet-P | 0.801 | 3.43 | 2m 35s |
-| FlashDet-N | 0.699 | 2.73 | 2m 42s |
-| FlashDet-S | 0.767 | 2.44 | 3m 28s |
-| FlashDet-M | 0.857 | 1.99 | 4m 48s |
-| FlashDet-L | 0.844 | 1.91 | 6m 23s |
-| FlashDet-X | 0.896 | 1.70 | 8m 00s |
+| FlashDet-P | 0.788 | 3.46 | 2m 35s |
+| FlashDet-N | 0.687 | 2.82 | 2m 42s |
+| FlashDet-S | 0.756 | 2.55 | 3m 28s |
+| FlashDet-M | 0.851 | 2.05 | 4m 48s |
+| FlashDet-L | 0.830 | 1.93 | 6m 23s |
+| FlashDet-X | 0.883 | 1.71 | 8m 00s |
 
 ## Bugs found and fixed
 

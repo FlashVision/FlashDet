@@ -20,8 +20,9 @@ class Track:
 
     def __init__(self, detection: np.ndarray, kf: KalmanFilter):
         self.kf = kf
-        self.track_id = Track._next_id
-        Track._next_id += 1
+        cls = type(self)
+        self.track_id = cls._next_id
+        cls._next_id += 1
 
         self.mean, self.covariance = kf.initiate(xyxy_to_cxywh(detection[:4]))
         self.score = float(detection[4])

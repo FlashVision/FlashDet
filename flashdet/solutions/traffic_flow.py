@@ -45,12 +45,18 @@ class TrafficFlow(BaseSolution):
 
     @staticmethod
     def _evenly_spaced_labels(n_directions: int) -> list:
-        """Return *n_directions* evenly-spaced compass labels from the 8-point rose."""
+        """Return exactly *n_directions* compass labels from the 8-point rose."""
+        if n_directions < 1:
+            raise ValueError("n_directions must be >= 1")
         all_labels = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-        if n_directions >= 8:
+        if n_directions == 8:
             return list(all_labels)
-        step = 8 // n_directions
-        return [all_labels[i * step] for i in range(n_directions)]
+        # Snap each bin to the nearest compass point. This never returns
+        # fewer labels than the number of direction bins.
+        return [
+            all_labels[int(round(i * 8 / n_directions)) % 8]
+            for i in range(n_directions)
+        ]
 
     def __init__(
         self,
@@ -74,6 +80,9 @@ class TrafficFlow(BaseSolution):
         self._track_history: Dict[int, deque] = defaultdict(
             lambda: deque(maxlen=history_length)
         )
+        self._track_frames: Dict[int, deque] = defaultdict(
+            lambda: deque(maxlen=history_length)
+        )
         self._direction_counts: Dict[str, int] = defaultdict(int)
         self._direction_speeds: Dict[str, List[float]] = defaultdict(list)
         self._assigned_tracks: set = set()
@@ -94,9 +103,12 @@ class TrafficFlow(BaseSolution):
 
             cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
             self._track_history[tid].append((cx, cy))
+            self._track_frames[tid].append(self._frame_idx)
 
             history = self._track_history[tid]
-            direction, speed, angle = self._compute_flow(history)
+            direction, speed, angle = self._compute_flow(
+                history, self._track_frames[tid]
+            )
 
             color = (0, 255, 0)
             cv2.rectangle(annotated, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
@@ -142,13 +154,14 @@ class TrafficFlow(BaseSolution):
     def reset(self):
         super().reset()
         self._track_history.clear()
+        self._track_frames.clear()
         self._direction_counts.clear()
         self._direction_speeds.clear()
         self._assigned_tracks.clear()
         self._frame_idx = 0
 
     def _compute_flow(
-        self, history: deque
+        self, history: deque, frames: deque = None
     ) -> Tuple[Optional[str], float, float]:
         """Compute direction label, speed, and angle from track history."""
         if len(history) < 5:
@@ -164,7 +177,10 @@ class TrafficFlow(BaseSolution):
 
         angle = math.atan2(displacement[1], displacement[0])
 
-        n_frames = len(history) - 1
+        if frames is not None and len(frames) >= 2:
+            n_frames = max(1, int(frames[-1] - frames[0]))
+        else:
+            n_frames = len(history) - 1
         if self.pixels_per_meter == 1.0:
             speed = dist / n_frames
         else:

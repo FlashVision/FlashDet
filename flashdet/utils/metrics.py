@@ -86,6 +86,29 @@ def compute_map(
     Returns:
         Dictionary with AP per class and mAP
     """
+    if len(predictions) != len(ground_truths):
+        raise ValueError(
+            f"predictions ({len(predictions)}) and ground_truths "
+            f"({len(ground_truths)}) must have the same length"
+        )
+
+    # Accept both numpy arrays and plain Python lists.
+    predictions = [
+        {
+            "boxes": np.asarray(p.get("boxes", []), dtype=np.float32).reshape(-1, 4),
+            "scores": np.asarray(p.get("scores", []), dtype=np.float32).reshape(-1),
+            "labels": np.asarray(p.get("labels", []), dtype=np.int64).reshape(-1),
+        }
+        for p in predictions
+    ]
+    ground_truths = [
+        {
+            "boxes": np.asarray(g.get("boxes", []), dtype=np.float32).reshape(-1, 4),
+            "labels": np.asarray(g.get("labels", []), dtype=np.int64).reshape(-1),
+        }
+        for g in ground_truths
+    ]
+
     if num_classes is None:
         all_labels = set()
         for gt in ground_truths:
@@ -142,17 +165,20 @@ def compute_map(
         for pred_idx, pred in enumerate(all_preds):
             best_iou = 0
             best_gt_idx = -1
-            
+
+            # COCO matching: choose the best GT regardless of whether it was
+            # already matched. If that GT is already taken, the detection is a
+            # false positive (it must not steal a different, unmatched GT).
             for gt_idx, gt in enumerate(all_gts):
-                if gt["img_idx"] != pred["img_idx"] or gt["matched"]:
+                if gt["img_idx"] != pred["img_idx"]:
                     continue
-                
+
                 iou = compute_iou(pred["box"], gt["box"])
                 if iou > best_iou:
                     best_iou = iou
                     best_gt_idx = gt_idx
-            
-            if best_iou >= iou_threshold:
+
+            if best_iou >= iou_threshold and best_gt_idx >= 0 and not all_gts[best_gt_idx]["matched"]:
                 tp[pred_idx] = 1
                 all_gts[best_gt_idx]["matched"] = True
             else:

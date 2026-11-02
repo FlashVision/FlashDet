@@ -179,12 +179,12 @@ convergence, not a COCO accuracy claim.
 
 | Model | Params | mAP@0.5 | Training time |
 |---|---:|---:|---:|
-| FlashDet-P | 0.40M | 0.801 | 2m 35s |
-| FlashDet-N | 0.85M | 0.699 | 2m 42s |
-| FlashDet-S | 1.95M | 0.767 | 3m 28s |
-| FlashDet-M | 4.23M | 0.857 | 4m 48s |
-| FlashDet-L | 7.25M | 0.844 | 6m 23s |
-| FlashDet-X | 11.26M | 0.896 | 8m 00s |
+| FlashDet-P | 0.40M | 0.788 | 2m 35s |
+| FlashDet-N | 0.85M | 0.687 | 2m 42s |
+| FlashDet-S | 1.95M | 0.756 | 3m 28s |
+| FlashDet-M | 4.23M | 0.851 | 4m 48s |
+| FlashDet-L | 7.25M | 0.830 | 6m 23s |
+| FlashDet-X | 11.26M | 0.883 | 8m 00s |
 
 What the run showed:
 

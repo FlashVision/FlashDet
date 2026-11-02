@@ -32,6 +32,28 @@ All notable changes to FlashDet will be documented in this file.
   three-entry hardcoded mapping.
 
 ### Fixed
+- **mAP matching** — duplicate detections could steal a second, unmatched GT;
+  matching now follows COCO semantics and accepts plain Python lists.
+- **Validator** — rebuilds the checkpoint's actual architecture/backbone and
+  warns on missing/unexpected weights instead of silently scoring a FlashDet
+  model against YOLO weights.
+- **Semi-supervised training** — fixed the epoch override signature and
+  initialise the frozen teacher from the student.
+- **YOLO training** — YOLOv10 now trains both o2o and o2m heads; YOLOv8 accepts
+  a training loss. YOLOX training raises a clear NotImplementedError instead of
+  failing with a TypeError.
+- **EMA warmup** — exponential decay ramp now approaches the target instead of
+  reaching only ~0.7 in realistic runs.
+- **Tracking** — fixed DeepSORT cascade thresholds, KCF peak displacement,
+  track-ID reset, ByteTrack low-score association, and repeated linear
+  predictor calls.
+- **Counting/heatmap** — fixed traffic direction label indexing, frame-delta
+  speed, crowd grid negative indices, object-counter line hysteresis, heatmap
+  decay/resolution changes, and parking spot ID gaps.
+- **DDP validation** — validation now runs on the full validation set on rank 0,
+  and early stopping is broadcast to all ranks.
+- **Checkpoints** — strip `torch.compile` prefixes and training-only heads from
+  inference weights.
 - **Inference preprocessing mismatch (critical)** — `Predictor` used BGR,
   `/255`, top-left padding and scale-only box mapping. It now uses the same
   RGB + ImageNet mean/std + centred letterbox and inverse-warp box mapping as

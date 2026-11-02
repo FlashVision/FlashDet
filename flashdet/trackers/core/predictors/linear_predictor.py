@@ -29,12 +29,14 @@ class LinearPredictor(BasePredictor):
         self._history_length = history_length
         self._history: deque = deque(maxlen=history_length)
         self._last: np.ndarray = np.zeros(4)
+        self._pred_steps = 0
 
     def initiate(self, bbox: np.ndarray):
         cxywh = xyxy_to_cxywh(bbox)
         self._last = cxywh.copy()
         self._history.clear()
         self._history.append(cxywh.copy())
+        self._pred_steps = 0
 
     def predict(self) -> np.ndarray:
         if len(self._history) < 2:
@@ -44,7 +46,7 @@ class LinearPredictor(BasePredictor):
         t = np.arange(len(pts), dtype=np.float64)
 
         predicted = np.zeros(4, dtype=np.float64)
-        t_next = float(len(pts))
+        t_next = float(len(pts) + self._pred_steps)
         for dim in range(4):
             coeffs = np.polyfit(t, pts[:, dim], deg=1)
             predicted[dim] = np.polyval(coeffs, t_next)
@@ -52,9 +54,11 @@ class LinearPredictor(BasePredictor):
         predicted[2] = max(predicted[2], 1.0)  # width > 0
         predicted[3] = max(predicted[3], 1.0)  # height > 0
         self._last = predicted
+        self._pred_steps += 1
         return cxywh_to_xyxy(predicted)
 
     def update(self, bbox: np.ndarray):
         cxywh = xyxy_to_cxywh(bbox)
         self._last = cxywh.copy()
         self._history.append(cxywh.copy())
+        self._pred_steps = 0
