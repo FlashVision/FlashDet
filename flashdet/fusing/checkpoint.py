@@ -88,7 +88,11 @@ def apply_fusion_manifest(model: nn.Module, fusion: dict,
 
 def save_fused_checkpoint(model: nn.Module, path: str, *, config: dict,
                           input_size: int, report=None) -> str:
-    """Save a fused model as a plain, safely-loadable state dict."""
+    """Save a fused model as a plain, safely-loadable state dict.
+
+    Training-only branches (auxiliary / one-to-many heads) are omitted, so the
+    file only contains what inference needs.
+    """
     state = {
         k.replace("_orig_mod.", "", 1): v
         for k, v in model.state_dict().items()

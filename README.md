@@ -282,15 +282,14 @@ checkpoint.pth (FP32) ...................... 1.37 MB   mAP 0.601
    ├─ flashdet fuse ........................ 1.21 MB   mAP 0.601
    │     ├─ flashdet fuse --half ........... 0.63 MB   mAP 0.601
    │     └─ flashdet export --simplify ..... 1.22 MB   mAP 0.601
-   │            └─ export --int8 --calib-images ...
-   │                                       .. 0.52 MB   mAP 0.589
+   │            └─ flashdet export --int8 .. 0.52 MB   mAP 0.589
    │
    └─ flashdet export --simplify ........... 1.28 MB   mAP 0.601
 ```
 
-The first row is the PyTorch checkpoint; the right column is the on-disk size
-and validation accuracy of each artifact. Fusion and export are alternatives
-that compose: fusing first gives the smallest ONNX and INT8 files.
+The top line is the source checkpoint; the right column is the on-disk size and
+validation accuracy of each artifact. Fusion and export can be applied
+independently, and fusing first gives the smallest ONNX and INT8 files.
 
 Measured on the `p-demo-synth10` checkpoint (369K params, 10 classes, 128×128
 input) on a 16-thread CPU with PyTorch 2.13 and onnxruntime 1.21. Latency is
@@ -309,8 +308,9 @@ warmups. The validation split is the 200-image synthetic set.
 | INT8 ONNX, fused | 356,432 | 0.52 MB | 0.64 ms | 1,551 | 0.589 | 0.921 |
 
 \* General-purpose CPUs do not accelerate FP16 arithmetic, so the FP16 latency
-is *worse* than FP32. Treat FP16 as a storage/GPU format; the file size is the
-point. On a GPU, FP16 also reduces memory traffic.
+is *worse* than FP32. Treat FP16 as a storage/download format: the inference
+loader upcasts it to FP32, so the file size is the point. A serving stack that
+casts to half on CUDA can use the same weights directly.
 
 End to end, the demo model goes from **4.80 ms / 1.37 MB / mAP 0.601** to
 **0.64 ms / 0.52 MB / mAP 0.589**: 7.5× faster, 2.6× smaller, and 1.2 points
@@ -368,9 +368,10 @@ A few things worth knowing when reading the table:
 
 | Deployment | Artifact | Why |
 |---|---|---|
-| CUDA server, accuracy first | `flashdet fuse --half` (0.63 MB) | FP16 compute on GPU, fused convs, no quantization loss |
+| CUDA server, accuracy first | `flashdet fuse` (1.21 MB) | Fused convs, no quantization loss, native FP32 runtime |
 | CPU server / edge | `flashdet export --int8` from the fused model | 0.52 MB, ~1.5k FPS on 16 threads, mAP within 2% of FP32 |
-| Portable runtime (no PyTorch) | `flashdet export --simplify` (FP32 ONNX) | Matches PyTorch at ≈1e-4, no calibration data needed |
+| Portable runtime (no PyTorch) | `flashdet export --simplify` (1.22 MB) | Matches PyTorch at ≈1e-4, no calibration data needed |
+| Shipping / weight distribution | `flashdet fuse --half` (0.63 MB) | Half the disk; the loader upcasts to FP32 for inference |
 | Fine-tuning base | Original checkpoint | Training needs the unfused graph |
 
 ---
