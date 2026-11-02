@@ -48,6 +48,12 @@ Verify the installation:
 flashdet check
 ```
 
+Skip training entirely by grabbing the demo checkpoint:
+
+```bash
+flashdet weights --name p-demo-synth10          # ~0.75 MB, checksum-verified
+```
+
 ---
 
 ## Quick start
@@ -194,6 +200,9 @@ Useful options:
 | `--finetune` | Warm-start from weights |
 | `--config` | YAML configuration |
 
+Run `flashdet --help` for the full list — `predict`, `val`, `export`,
+`benchmark`, `weights` and `download` are all in there.
+
 ### Python
 
 ```python
@@ -228,12 +237,20 @@ python train.py --qlora --qlora-dtype nf4 --lora-rank 8
 
 ---
 
-## Validation and export
+## Validation, export and benchmarking
 
 ```bash
 flashdet val --model best.pth --val-images data/valid
-flashdet export --model best.pth --output model.onnx
+flashdet export --model best.pth --simplify          # ONNX, parity-checked, Rep blocks fused
+flashdet export --model best.pth --int8 --calib-images data/valid   # + INT8 ONNX
+flashdet benchmark --model best.pth --val-images data/valid        # FPS + mAP in one go
 ```
+
+The export step runs a PyTorch↔ONNXRuntime parity check automatically and
+reports a decoded-box IoU for the INT8 model, so the exported file is verified
+before you ship it. On a 3-epoch sample this means: FP32/FP16 ONNX matches
+PyTorch at max|Δ| ≈ 1e-4, and INT8 typically costs a few percent of box IoU
+(depending on how much calibration data you give it).
 
 Training writes these files:
 

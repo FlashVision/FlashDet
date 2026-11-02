@@ -14,7 +14,7 @@ from flashdet.models.detector import build_model
 from flashdet.data import create_dataloader
 from flashdet.utils import AverageMeter
 from flashdet.utils.checkpoint import safe_torch_load
-from flashdet.utils.metrics import compute_map
+from flashdet.utils.metrics import compute_map, compute_map_coco_summary
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +213,14 @@ class Validator:
             "val_loss": loss_meter.avg,
             "AP_per_class": map_results.get("AP_per_class", {}),
         }
+
+        if self.iou_threshold == 0.5:
+            coco_summary = compute_map_coco_summary(all_preds, all_gts, num_cls)
+            if coco_summary:
+                result["coco_summary"] = {
+                    "map50": coco_summary.get("mAP@0.5", 0.0),
+                    "map5095": coco_summary.get("mAP@0.5:0.95", 0.0),
+                }
 
         logger.info(f"Validation: mAP@{self.iou_threshold:.2f} = {result['mAP']:.4f}, "
                     f"Loss = {result['val_loss']:.4f}")

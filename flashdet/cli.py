@@ -271,6 +271,9 @@ def cmd_val(args):
     results = validator.validate()
     print(f"mAP@{validator.iou_threshold:.2f}: {results['mAP']:.4f}")
     print(f"Validation loss: {results['val_loss']:.4f}")
+    coco = results.get("coco_summary")
+    if coco and coco.get("map5095") is not None:
+        print(f"mAP@0.5:0.95: {coco['map5095']:.4f}")
     if results.get("AP_per_class"):
         print("Per-class AP:")
         for cid, ap in sorted(results["AP_per_class"].items()):
@@ -278,71 +281,104 @@ def cmd_val(args):
             print(f"  {name}: {ap:.4f}")
 
 
+def cmd_benchmark(args):
+    """Benchmark speed (and optionally accuracy) for a checkpoint."""
+    from flashdet.benchmark import benchmark_checkpoint, save_report
+
+    summary = benchmark_checkpoint(
+        args.model,
+        input_size=args.input_size,
+        device=args.device,
+        warmup=args.warmup,
+        repeats=args.repeats,
+        fuse=args.fuse,
+        val_images=args.val_images,
+        conf=args.conf,
+    )
+    print(f"\nBenchmark: {summary['model']}")
+    print(f"  Architecture:       {summary['architecture']}")
+    print(f"  Input size:         {summary['input_size']}x{summary['input_size']}")
+    print(f"  Params:             {summary['params']:,}")
+    print(f"  FP16 weights:       {summary['params_fp16_mb']:.2f} MB")
+    print(f"  Latency (median):   {summary['latency_ms']:.2f} ms/image")
+    print(f"  Throughput:         {summary['throughput_fps']:.1f} FPS")
+    evals = summary.get("eval")
+    if evals:
+        print(f"  mAP@0.5:            {evals['mAP50']*100:.2f}%")
+        if evals.get("mAP5095") is not None:
+            print(f"  mAP@0.5:0.95:       {evals['mAP5095']*100:.2f}%")
+        per_class = evals.get("AP_per_class")
+        if per_class:
+            print("  Per-class AP:")
+            for cid, ap in sorted(per_class.items()):
+                print(f"    {cid}: {ap:.4f}")
+    out = save_report(summary, args.output)
+    if out:
+        print(f"\nReport saved: {out}")
+
+
 def cmd_export(args):
-    """Export model to ONNX."""
-    import torch
-    from flashdet.models.detector import build_model
-    from flashdet.cfg import get_config
+    """Export model to ONNX (optionally INT8-quantized), with parity check."""
+    from flashdet.deployment import (
+        export_onnx, check_parity, onnx_quantize_int8, detection_parity,
+    )
 
-    from flashdet.utils.checkpoint import safe_torch_load
-
-    model_path = args.model
-    output_path = args.output or os.path.splitext(model_path)[0] + ".onnx"
-
-    ckpt = safe_torch_load(model_path, map_location="cpu")
-    cfg_data = ckpt.get("config", {})
-    arch = cfg_data.get("architecture", "flashdet")
-    num_classes = cfg_data.get("num_classes", 80)
-    model_size = cfg_data.get("model_size", "n")
-    input_size = cfg_data.get("input_size")
-    if isinstance(input_size, (list, tuple)):
-        input_size = input_size[0]
-
-    config = get_config(num_classes=num_classes)
-    config.model.architecture = arch
-    config.model.size = model_size
-    input_size = int(input_size or config.model.input_size[0])
-    # Pico selectors (required for the new backbone/neck zoo).
-    config.model.backbone_type = cfg_data.get("backbone_type") or "lite"
-    config.model.neck_type = cfg_data.get("neck_type")
-    if arch == "flashdet" and config.model.backbone_type == "lite":
-        peek = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt))
-        if isinstance(peek, dict) and any(
-            k.startswith("backbone.stem.") or k.startswith("backbone.stages.")
-            for k in peek
-        ):
-            config.model.backbone_type = "repnext"
-    if arch in ("yolov8", "yolov9", "yolov10", "yolov11"):
-        config.model.width_mult = cfg_data.get("width_mult", 1.0)
-        config.model.depth_mult = cfg_data.get("depth_mult", 1.0)
-
-    model = build_model(config, architecture=arch)
-    state_dict = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt))
-    model.load_state_dict(state_dict, strict=False)
-    model.eval()
-
-    class _ExportWrapper(torch.nn.Module):
-        """Wrapper that returns only tensor outputs for ONNX export."""
-        def __init__(self, model):
-            super().__init__()
-            self.model = model
-
-        def forward(self, x):
-            out = self.model(x)
-            return torch.cat([out["o2o_cls"], out["o2o_reg"]], dim=-1)
-
-    wrapper = _ExportWrapper(model)
-    wrapper.eval()
-
-    dummy = torch.randn(1, 3, input_size, input_size)
-    torch.onnx.export(
-        wrapper, dummy, output_path,
-        input_names=["images"],
-        output_names=["output"],
-        opset_version=13,
-        dynamic_axes={"images": {0: "batch"}, "output": {0: "batch"}},
+    output_path = export_onnx(
+        args.model,
+        args.output,
+        fuse=args.fuse,
+        simplify=args.simplify,
     )
     print(f"Exported to {output_path}")
+    if args.check_parity:
+        try:
+            report = check_parity(args.model, output_path)
+            state = "OK" if report["ok"] else "OUT OF TOLERANCE"
+            print(f"Parity check: {state} "
+                  f"(max|Δ|={report['max_abs_diff']:.5f}, "
+                  f"mean|Δ|={report['mean_abs_diff']:.6f})")
+        except ImportError as exc:
+            print(f"Parity check skipped: {exc}")
+    if args.int8:
+        if not args.calib_images:
+            print("INT8 skipped: --calib-images <dir> is required")
+        else:
+            int8_path = onnx_quantize_int8(
+                output_path,
+                calib_images=args.calib_images,
+                max_batches=args.calib_batches,
+            )
+            size_onnx = os.path.getsize(output_path) / (1024 * 1024)
+            size_int8 = os.path.getsize(int8_path) / (1024 * 1024)
+            print(f"INT8 model: {int8_path}")
+            print(f"  FP16/FP32 ONNX: {size_onnx:.2f} MB -> INT8: {size_int8:.2f} MB")
+            try:
+                q_report = check_parity(args.model, int8_path, rtol=5e-2, atol=5e-2)
+                print(f"  INT8 vs PyTorch tensors: max|Δ|={q_report['max_abs_diff']:.4f}, "
+                      f"mean|Δ|={q_report['mean_abs_diff']:.5f} (raw tensors can differ)")
+                det_report = detection_parity(args.model, int8_path)
+                print(f"  INT8 box IoU vs PyTorch: mean={det_report['mean_box_iou']:.3f} "
+                      f"(min={det_report['min_box_iou']:.3f}) — ≥0.9 is production-ready")
+            except ImportError as exc:
+                print(f"  INT8 parity skipped: {exc}")
+
+
+def cmd_weights(args):
+    """List / download registered demo checkpoints."""
+    from flashdet.hub import list_weights, WEIGHTS, download_weights
+
+    if args.list or not args.name:
+        print("Available checkpoints:")
+        for name in list_weights():
+            item = WEIGHTS[name]
+            print(f"\n  {name}")
+            print(f"    {item['description']}")
+            print(f"    Classes: {item.get('num_classes', '?')}")
+        if not args.name:
+            print("\nDownload with: flashdet weights --name <name>")
+            return
+    path = download_weights(args.name, save_dir=args.save_dir, force=args.force)
+    print(f"Ready: {path}")
 
 
 def cmd_datasets(args):
@@ -447,8 +483,44 @@ Documentation: https://github.com/FlashVision/FlashDet
     # export
     exp_p = subparsers.add_parser("export", help="Export model to ONNX format")
     exp_p.add_argument("--model", required=True, help="Path to .pth checkpoint")
-    exp_p.add_argument("--output", default="model.onnx", help="Output path (default: model.onnx)")
-    exp_p.add_argument("--simplify", action="store_true", help="Simplify ONNX graph")
+    exp_p.add_argument("--output", default=None, help="Output path (default: alongside the checkpoint)")
+    exp_p.add_argument("--simplify", action="store_true", help="Simplify ONNX graph (onnxslim or onnxsim)")
+    exp_p.add_argument("--no-fuse", dest="fuse", action="store_false",
+                       help="Skip reparameterization fusion before export")
+    exp_p.add_argument("--check-parity", dest="check_parity", action="store_true", default=True,
+                       help=argparse.SUPPRESS)
+    exp_p.add_argument("--no-parity", dest="check_parity", action="store_false",
+                       help="Skip the PyTorch vs ONNXRuntime parity check")
+    exp_p.add_argument("--int8", action="store_true",
+                       help="Also produce an INT8-quantized ONNX (requires --calib-images)")
+    exp_p.add_argument("--calib-images", default=None,
+                       help="Folder of calibration images for INT8 quantization")
+    exp_p.add_argument("--calib-batches", type=int, default=16,
+                       help="Calibration batches consumed (default: 16)")
+
+    # weights
+    w_p = subparsers.add_parser("weights", help="List or download ready-to-use checkpoints")
+    w_p.add_argument("--list", action="store_true", help="List available checkpoints")
+    w_p.add_argument("--name", default=None,
+                     help="Registry name to download (e.g. p-demo-synth10)")
+    w_p.add_argument("--save-dir", default=None, help="Download directory (default: ./weights)")
+    w_p.add_argument("--force", action="store_true", help="Re-download even if present")
+
+    # benchmark
+    bench_p = subparsers.add_parser("benchmark", help="Benchmark speed and accuracy for a checkpoint")
+    bench_p.add_argument("--model", required=True, help="Path to .pth checkpoint")
+    bench_p.add_argument("--input-size", type=int, default=None,
+                         help="Input size (default: from checkpoint config)")
+    bench_p.add_argument("--device", default="cpu", help="Device (default: cpu)")
+    bench_p.add_argument("--warmup", type=int, default=20, help="Warmup forwards (default: 20)")
+    bench_p.add_argument("--repeats", type=int, default=100, help="Measured forwards (default: 100)")
+    bench_p.add_argument("--no-fuse", dest="fuse", action="store_false",
+                         help="Skip the reparameterization fusion step")
+    bench_p.add_argument("--val-images", default=None,
+                         help="Optional COCO-format validation split to also report mAP")
+    bench_p.add_argument("--conf", type=float, default=0.05,
+                         help="Confidence threshold for the accuracy pass (default: 0.05)")
+    bench_p.add_argument("--output", default=None, help="Save the report as JSON")
 
     args = parser.parse_args()
 
@@ -467,6 +539,8 @@ Documentation: https://github.com/FlashVision/FlashDet
         "predict": cmd_predict,
         "val": cmd_val,
         "export": cmd_export,
+        "benchmark": cmd_benchmark,
+        "weights": cmd_weights,
     }
 
     commands[args.command](args)

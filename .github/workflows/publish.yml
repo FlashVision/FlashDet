@@ -33,7 +33,7 @@ jobs:
       reason: ${{ steps.check.outputs.reason }}
     steps:
       - name: Check out the tested commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.event.release.tag_name || github.ref }}
 
@@ -95,12 +95,12 @@ jobs:
       PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
     steps:
       - name: Check out the tested commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.event.release.tag_name || github.ref }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: "pip"

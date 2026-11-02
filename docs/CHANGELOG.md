@@ -59,6 +59,15 @@ All notable changes to FlashDet will be documented in this file.
 - **Training performance** — opt-in channels-last, TF32 and cuDNN autotuning;
   fused/foreach optimizers, non-blocking copies and `set_to_none`; full-set
   validation on DDP rank 0.
+- **Benchmark CLI** — `flashdet benchmark` reports parameters, FP16 weight
+  size, median latency, throughput and optional mAP in one command; the
+  validator now returns a COCO-style mAP@0.5 and mAP@0.5:0.95 summary.
+- **Deployment package** — `flashdet export` now fuses Rep blocks, runs a
+  PyTorch↔ONNXRuntime parity check automatically, honors `--simplify`, and can
+  produce a checksum-verified INT8 ONNX with decoded-box IoU reporting
+  (`--int8 --calib-images`).
+- **Model zoo** — `flashdet weights` downloads checksum-verified demo
+  checkpoints from GitHub Releases.
 - **Decoupled weight decay** — AdamW/SGD no longer decay biases and
   normalization parameters, which removes a hard floor on late-training loss.
 - **CLI validation** — `flashdet val` now derives `_annotations.coco.json`,
