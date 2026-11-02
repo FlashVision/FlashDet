@@ -63,6 +63,27 @@ class TestE2ELoss:
         assert all(l < 10000 for l in losses)
         assert all(not np.isnan(l) for l in losses)
 
+    def test_prog_alpha_is_zero_based(self):
+        from flashdet.losses.e2e_loss import E2EDetectionLoss
+
+        loss = E2EDetectionLoss(
+            num_classes=5, strides=(8, 16, 32),
+            alpha_init=0.8, alpha_final=0.2,
+        )
+        assert loss.prog_alpha(0, 10) == pytest.approx(0.8)
+        assert loss.prog_alpha(9, 10) == pytest.approx(0.2)
+        assert loss.prog_alpha(20, 10) == pytest.approx(0.2)
+
+    def test_loss_total_is_per_sample(self, model_and_input):
+        model, x, gt = model_and_input
+        out = model(x, gt_meta=gt, epoch=0)
+        # ``loss`` is batch-scaled for the linear gradient rule; the logging
+        # metric must stay per-sample so it does not depend on batch size.
+        assert out["loss"].item() == pytest.approx(
+            out["loss_states"]["loss_total"].item() * x.shape[0],
+            rel=1e-4,
+        )
+
     def test_empty_gt_no_crash(self):
         model = FlashDet(num_classes=5, size="n")
         model.train()

@@ -476,7 +476,7 @@ class Trainer:
             if (epoch + 1) % val_interval == 0:
                 self.callbacks.fire("on_val_start", self)
                 val_loss, map50 = self._validate(
-                    raw_model, val_loader, ema, class_names,
+                    raw_model, val_loader, ema, class_names, epoch=epoch,
                 )
                 epoch_metrics["val_loss"] = val_loss
                 epoch_metrics["val_mAP"] = map50
@@ -647,7 +647,8 @@ class Trainer:
             images = images.to(self.device)
 
             with torch.amp.autocast(self.device.type, enabled=use_amp):
-                output = model(images, gt_meta, epoch=epoch + 1)
+                # ProgLoss schedule is 0-based; epoch is the loop index.
+                output = model(images, gt_meta, epoch=epoch)
                 loss = output["loss"] / self.grad_accum
 
             if torch.isnan(loss).any():
@@ -704,7 +705,7 @@ class Trainer:
         return result
 
     @torch.no_grad()
-    def _validate(self, model, dataloader, ema, class_names):
+    def _validate(self, model, dataloader, ema, class_names, epoch=0):
         eval_model = ema.ema if ema is not None else model
         eval_model.eval()
 
@@ -715,11 +716,14 @@ class Trainer:
         for images, gt_meta in dataloader:
             images = images.to(self.device)
 
-            out = eval_model(images, gt_meta, epoch=0, compute_loss=True)
+            out = eval_model(images, gt_meta, epoch=epoch, compute_loss=True)
 
-            if "loss" in out:
-                loss_meter.update(out["loss"].item())
             loss_states = out.get("loss_states", {})
+            meter_loss = loss_states.get("loss_total", out.get("loss"))
+            if meter_loss is not None:
+                loss_meter.update(
+                    meter_loss.item() if hasattr(meter_loss, "item") else float(meter_loss)
+                )
             for key, val in loss_states.items():
                 if key.endswith("num_pos"):
                     continue

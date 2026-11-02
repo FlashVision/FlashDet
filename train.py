@@ -344,7 +344,10 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
 
 
         with torch.amp.autocast(device.type, enabled=use_amp):
-            output = model(images, gt_meta, epoch=epoch)
+            # train_one_epoch receives a 1-based epoch for logging, but the
+            # ProgLoss schedule is 0-based. Pass the same index that
+            # validate() uses so train/val alpha match.
+            output = model(images, gt_meta, epoch=max(epoch - 1, 0))
             loss = output["loss"]
             if loss.dim() > 0:
                 loss = loss.mean()
@@ -382,8 +385,9 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, save_di
             if ema is not None:
                 ema.update(raw_model)
         
-        raw_loss = output["loss"]
-        loss_meter.update(raw_loss.mean().item() if raw_loss.dim() > 0 else raw_loss.item())
+        # Log the per-sample loss, not the batch-scaled gradient loss.
+        meter_loss = loss_states.get("loss_total", output["loss"])
+        loss_meter.update(meter_loss.mean().item() if meter_loss.dim() > 0 else meter_loss.item())
         for key, val in loss_states.items():
             if "pos" in key:
                 continue
@@ -469,9 +473,11 @@ def validate(model, dataloader, device, logger, ema=None, class_names=None,
 
         out = eval_model(images, gt_meta, epoch=epoch, compute_loss=True)
 
-        if "loss" in out:
-            loss_meter.update(out["loss"].item())
         loss_states = getattr(eval_model, "_last_loss_states", out.get("loss_states", {}))
+        # Use the per-sample loss so validation loss is independent of batch size.
+        meter_loss = loss_states.get("loss_total", out.get("loss"))
+        if meter_loss is not None:
+            loss_meter.update(meter_loss.item() if hasattr(meter_loss, "item") else float(meter_loss))
         for key, val in loss_states.items():
             if "pos" in key:
                 continue

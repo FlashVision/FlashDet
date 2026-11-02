@@ -567,6 +567,7 @@ FlashDet/
 | [Testing](tests/TESTING.md) | Unit, integration and TDD workflow |
 | [Security Audit](docs/SECURITY-AUDIT.md) | Pen-test findings and hardening notes |
 | [Load Test](docs/LOAD-TEST.md) | Concurrency results and serving recommendations |
+| [Training Matrix](docs/TRAINING-MATRIX.md) | 1,000-image / 10-class run across all model sizes |
 | [Hardcoding Audit](docs/HARDCODING-AUDIT.md) | Configuration cleanup notes |
 | [FAQ](docs/FAQ.md) | Common questions |
 | [Changelog](docs/CHANGELOG.md) | Version history |

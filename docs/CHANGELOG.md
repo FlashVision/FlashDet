@@ -26,6 +26,12 @@ All notable changes to FlashDet will be documented in this file.
   three-entry hardcoded mapping.
 
 ### Fixed
+- **ProgLoss epoch alignment** — training used a 1-based epoch while validation
+  used 0-based, so the two passes applied different ProgLoss weights. Both now
+  use the same 0-based schedule.
+- **Batch-size-dependent validation loss** — validation logged the batch-scaled
+  gradient loss instead of the per-sample loss. Logging now uses
+  `loss_states["loss_total"]`; gradients are unchanged.
 - **Pico training CSV** — validation loss/mAP columns were aligned by list index instead of epoch, so logging stopped writing validation metrics after the first few validation epochs.
 - **Pico checkpoint loading** — `backbone_type` and `neck_type` are now saved in checkpoints and restored by `test.py`, `flashdet predict` and `flashdet export`.
 - **Pico backbone sniffing** — old checkpoints still infer `repnext` from state-dict keys, while new zoo checkpoints no longer get misdetected as RepNeXt.
